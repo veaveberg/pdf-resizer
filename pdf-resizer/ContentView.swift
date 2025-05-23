@@ -2119,11 +2119,8 @@ struct ContentView: View {
             return
         }
         
-        // Capture current size before loading new PDF
-        let previousSize = currentSize
-        
         // Ensure any existing PDF document reference is released properly
-        if let existingPDF = self.pdfDocument {
+        if self.pdfDocument != nil {
             // Release any references to the previous PDF document
             self.pdfDocument = nil
         }
@@ -2132,68 +2129,39 @@ struct ContentView: View {
         
         // Use a high-priority queue for PDF document loading to prevent inversions
         DispatchQueue.global(qos: .userInteractive).async {
-            do {
-                // Load the PDF document and get page count
-                if let newPdfDocument = PDFKit.PDFDocument(url: url) {
-                    let totalPageCount = newPdfDocument.pageCount
-                    
-                    // Add a timeout to prevent potential hanging if document is corrupted
-                    let processingTimeout = DispatchTime.now() + .seconds(5)
-                    var firstPageSize: CGSize?
-                    
-                    // Get the first page size with timeout protection
-                    if let page = newPdfDocument.page(at: 0) {
-                        firstPageSize = page.bounds(for: .mediaBox).size
-                    }
-                    
-                    // Update UI-related properties on the main thread
-                    DispatchQueue.main.async {
-                        self.pdfDocument = newPdfDocument
-                        self.totalPages = totalPageCount
-                        self.currentPage = 0 // Reset to first page
-                        
-                        // Get dimensions of first page
-                        if let pageSize = firstPageSize {
-                            self.currentSize = pageSize // This is in points
-                            
-                            // Update size adjusters with the new dimensions if appropriate
-                            if self.sizeAdjusters.isEmpty {
-                                // If somehow sizeAdjusters is empty, add one with original dimensions
-                                self.sizeAdjusters.append(SizeAdjuster(resizeMode: .fillSize, targetSize: pageSize))
-                            }
-                            // We no longer reset existing adjusters when loading a new PDF
-                        }
-                        
-                        self.saveFolder = url.deletingLastPathComponent()
-                        let baseName = url.deletingPathExtension().lastPathComponent
-                        self.outputBaseName = baseName
-                        self.originalOutputBaseName = baseName // ADDED: Set original base name
-                        
-                        // Reset bleed trim amount when loading a new PDF
-                        self.bleedTrimAmount = 0
-                        
-                        self.saveStatus = .idle // Reset save status on new PDF selection
-                    }
-                } else {
-                    throw NSError(domain: "PDFResizer", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not create PDF document from URL"])
-                }
-            } catch {
-                // Handle failure to load PDF on the main thread
+            // Load the PDF document and get page count
+            if let newPdfDocument = PDFKit.PDFDocument(url: url) {
+                let totalPageCount = newPdfDocument.pageCount
+                
+                // Update UI-related properties on the main thread
                 DispatchQueue.main.async {
-                    print("Error loading PDF: \(error)")
+                    self.pdfDocument = newPdfDocument
+                    self.totalPages = totalPageCount
+                    self.currentPage = 0
                     
-                    // Check if it's likely a permission error
-                    if !FileManager.default.isReadableFile(atPath: url.path) {
-                        self.saveStatus = .permissionError
-                        self.showPermissionErrorPopover = true
+                    // Reset processing state
+                    self.isProcessing = false
+                    self.saveStatus = .idle
+                    
+                    // Try to get actual page dimensions from first page 
+                    if let firstPage = newPdfDocument.page(at: 0) {
+                        let bounds = firstPage.bounds(for: .mediaBox)
+                        self.currentSize = bounds.size
+                        print("PDF loaded - Document: \(totalPageCount) pages, First page size: \(bounds.size.width)x\(bounds.size.height) points")
                     } else {
-                        self.saveStatus = .error
+                        print("Warning: Could not get bounds from first page")
                     }
+                    
+                    url.stopAccessingSecurityScopedResource()
+                }
+            } else {
+                DispatchQueue.main.async {
+                    print("Error: Failed to load PDF document from \(url)")
+                    self.selectedPDF = nil
+                    self.saveStatus = .error
+                    url.stopAccessingSecurityScopedResource()
                 }
             }
-            
-            // Be sure to stop accessing the resource when done
-            url.stopAccessingSecurityScopedResource()
         }
     }
     
@@ -2275,64 +2243,48 @@ struct ContentView: View {
             print("actuallyProcessAndSavePDFs called with no adjusters to process. Setting status to idle.")
             DispatchQueue.main.async {
                 isProcessing = false
-                saveStatus = .idle // Or a more specific status if needed
+                saveStatus = .idle
             }
             return
         }
 
-        isProcessing = true
+        // Determine the pages to process based on UI settings
+        let pagesToProcess: [Int]
+        if let pdfDoc = self.pdfDocument {
+            if pageSelection == .singlePage && currentPage >= 0 && currentPage < pdfDoc.pageCount {
+                pagesToProcess = [currentPage] // currentPage is already 0-based
+            } else {
+                // Process all pages
+                pagesToProcess = Array(0..<pdfDoc.pageCount)
+            }
+        } else {
+            pagesToProcess = [0] // Default to first page
+        }
+
+        print("Processing \(adjustersToProcess.count) adjusters for \(pagesToProcess.count) pages with overwrite: \(overwriteIntentForAllInBatch)")
 
         let baseForProcessing = outputBaseName
-        
-        // Get the pages to process based on user selection
-        let pagesToProcess: [Int]
-        if totalPages > 1 && pageSelection == .allPages {
-            // Process all pages
-            pagesToProcess = Array(0..<totalPages)
-        } else {
-            // Process only the current page
-            pagesToProcess = [currentPage]
-        }
 
-        // Important: Ensure we can access the resource
-        guard inputURL.startAccessingSecurityScopedResource() else {
-            DispatchQueue.main.async {
-                isProcessing = false
-                saveStatus = .permissionError
-                showPermissionErrorPopover = true
-            }
-            return
-        }
-
-        // Use userInteractive QoS to avoid priority inversions
         DispatchQueue.global(qos: .userInteractive).async {
             // Use a dispatch group to track completion of all processing
             let processingGroup = DispatchGroup()
             processingGroup.enter()
             
-            var processingResults: PDFProcessor.ProcessingResults?
+            var processingResults: (savedFiles: [String], errors: [String])?
             
-            do {
-                let results = PDFProcessor.processAndSavePDFs(
-                    inputURL: inputURL,
-                    saveFolderURL: folderURL,
-                    sizeAdjusters: adjustersToProcess,
-                    baseFileName: baseForProcessing,
-                    useSubfolder: self.useSubfolder,
-                    subfolderName: self.subfolderName,
-                    currentPDFSize: self.currentSize,
-                    bleedTrimAmount: self.bleedTrimAmount,
-                    allowOverwrite: overwriteIntentForAllInBatch,
-                    pageIndices: pagesToProcess // Pass all pages to process
-                )
-                processingResults = results
-            } catch {
-                print("Error processing PDF: \(error)")
-                DispatchQueue.main.async {
-                    self.isProcessing = false
-                    self.saveStatus = .error
-                }
-            }
+            let results = PDFProcessor.processAndSavePDFs(
+                inputURL: inputURL,
+                saveFolderURL: folderURL,
+                sizeAdjusters: adjustersToProcess,
+                baseFileName: baseForProcessing,
+                useSubfolder: self.useSubfolder,
+                subfolderName: self.subfolderName,
+                currentPDFSize: self.currentSize,
+                bleedTrimAmount: self.bleedTrimAmount,
+                allowOverwrite: overwriteIntentForAllInBatch,
+                pageIndices: pagesToProcess // Pass all pages to process
+            )
+            processingResults = results
             
             // Always clean up resources when done
             inputURL.stopAccessingSecurityScopedResource()
@@ -2686,272 +2638,108 @@ struct ContentView: View {
             // Create an autorelease pool to ensure memory is cleaned up properly
             autoreleasepool {
                 // Ensure we can access the security-scoped resource
-                let canAccess = url.startAccessingSecurityScopedResource()
+                guard url.startAccessingSecurityScopedResource() else {
+                    group.leave()
+                    return
+                }
+                
                 defer {
-                    // Always stop accessing when we're done, regardless of how we exit this block
-                    if canAccess {
-                        url.stopAccessingSecurityScopedResource()
+                    url.stopAccessingSecurityScopedResource()
+                    group.leave()
+                }
+                
+                // Load the PDF document with proper error handling
+                guard let pdfDocument = PDFKit.PDFDocument(url: url) else {
+                    print("Failed to load PDF document for thumbnail generation")
+                    return
+                }
+                
+                // Ensure the requested page exists
+                guard pageIndex >= 0 && pageIndex < pdfDocument.pageCount else {
+                    print("Page index \(pageIndex) out of range for PDF with \(pdfDocument.pageCount) pages")
+                    return
+                }
+                
+                guard let pdfPage = pdfDocument.page(at: pageIndex) else {
+                    print("Could not load page \(pageIndex) from PDF")
+                    return
+                }
+                
+                let pageRect = pdfPage.bounds(for: .mediaBox)
+                let effectiveRect: CGRect
+                
+                // Apply bleed trimming if specified
+                if bleedTrimAmount > 0 {
+                    let bleedTrimPoints = CGFloat.fromMillimeters(bleedTrimAmount)
+                    effectiveRect = pageRect.insetBy(dx: bleedTrimPoints, dy: bleedTrimPoints)
+                } else {
+                    effectiveRect = pageRect
+                }
+                
+                // Calculate preview dimensions
+                let previewSize: CGSize
+                if let target = targetSize {
+                    previewSize = target
+                } else {
+                    // Use a default thumbnail size
+                    let maxDimension: CGFloat = 300
+                    let aspectRatio = effectiveRect.width / effectiveRect.height
+                    if aspectRatio > 1 {
+                        previewSize = CGSize(width: maxDimension, height: maxDimension / aspectRatio)
+                    } else {
+                        previewSize = CGSize(width: maxDimension * aspectRatio, height: maxDimension)
                     }
                 }
                 
-                if let pdfDocument = PDFKit.PDFDocument(url: url),
-                   let page = pdfDocument.page(at: pageIndex) {
-                    // Generate thumbnail on high-priority thread
-                    let thumbSize = NSSize(width: 250, height: 200)
-                    let pageRect = page.bounds(for: .mediaBox)
+                // Generate the thumbnail image
+                let image = NSImage(size: previewSize)
+                image.lockFocus()
+                
+                if let context = NSGraphicsContext.current?.cgContext {
+                    // Fill with white background
+                    context.setFillColor(NSColor.white.cgColor)
+                    context.fill(CGRect(origin: .zero, size: previewSize))
                     
-                    // Calculate scale to fit within the view bounds
-                    let scale = min(thumbSize.width / pageRect.width, thumbSize.height / pageRect.height)
-                    let targetWidth = pageRect.width * scale
-                    let targetHeight = pageRect.height * scale
-                    
-                    // Create image with the view size to ensure proper centering
-                    let image = NSImage(size: thumbSize)
-                    image.lockFocus()
-                    
-                    // Calculate position to center the content
-                    let x = (thumbSize.width - targetWidth) / 2
-                    let y = (thumbSize.height - targetHeight) / 2
-                    
-                    // Full PDF area rectangle in view coordinates
-                    let fullRect = CGRect(x: x, y: y, width: targetWidth, height: targetHeight)
-                    
-                    // Get current graphics context
-                    if let ctx = NSGraphicsContext.current?.cgContext {
-                        // Draw white background for the whole PDF
-                        ctx.saveGState()
-                        NSColor.white.set()
-                        NSRect(x: x, y: y, width: targetWidth, height: targetHeight).fill()
-                        ctx.restoreGState()
-                        
-                        // Draw the PDF content
-                        ctx.saveGState()
-                        ctx.translateBy(x: x, y: y)
-                        ctx.scaleBy(x: scale, y: scale)
-                        page.draw(with: .mediaBox, to: ctx)
-                        ctx.restoreGState()
-                        
-                        // Calculate the effective rect after trimming (if trim is active)
-                        var effectiveRect = fullRect
-                        if bleedTrimAmount > 0 {
-                            // Convert bleedTrimAmount from mm to points
-                            let bleedTrimPoints = CGFloat.fromMillimeters(bleedTrimAmount)
-                            
-                            // Calculate the effective rect after trimming (in scaled coordinates)
-                            effectiveRect = CGRect(
-                                x: x + (bleedTrimPoints * scale),
-                                y: y + (bleedTrimPoints * scale),
-                                width: targetWidth - (2 * bleedTrimPoints * scale),
-                                height: targetHeight - (2 * bleedTrimPoints * scale)
-                            )
-                            
-                            // Apply trim overlay
-                            ctx.saveGState()
-                            
-                            // Draw dark overlay for trimmed areas (top, bottom, left, right)
-                            ctx.setFillColor(NSColor.black.withAlphaComponent(0.4).cgColor)
-                            
-                            // Top trim area
-                            ctx.fill(CGRect(x: fullRect.minX, y: effectiveRect.maxY, 
-                                          width: fullRect.width, height: fullRect.maxY - effectiveRect.maxY))
-                            
-                            // Bottom trim area
-                            ctx.fill(CGRect(x: fullRect.minX, y: fullRect.minY, 
-                                          width: fullRect.width, height: effectiveRect.minY - fullRect.minY))
-                            
-                            // Left trim area
-                            ctx.fill(CGRect(x: fullRect.minX, y: effectiveRect.minY, 
-                                          width: effectiveRect.minX - fullRect.minX, height: effectiveRect.height))
-                            
-                            // Right trim area
-                            ctx.fill(CGRect(x: effectiveRect.maxX, y: effectiveRect.minY, 
-                                          width: fullRect.maxX - effectiveRect.maxX, height: effectiveRect.height))
-                            
-                            // Draw white 1pt border around active area
-                            ctx.setStrokeColor(NSColor.white.cgColor)
-                            ctx.setLineWidth(1.0)
-                            ctx.stroke(effectiveRect)
-                            
-                            ctx.restoreGState()
-                        }
-                        
-                        // Apply fill/fit visualization if conditions are met
-                        if let targetSize = targetSize, resizeMode == .fillSize, showFillPreview {
-                            // Use the effective (trimmed) rect for fill calculations
-                            let effectiveWidth = effectiveRect.width
-                            let effectiveHeight = effectiveRect.height
-                            let currentAR = effectiveWidth / effectiveHeight
-                            let targetAR = targetSize.width / targetSize.height
-                            
-                            // Calculate the scaled dimensions that would be visible in fill mode
-                            var visibleRect = effectiveRect
-                            
-                            if currentAR > targetAR {
-                                // Current is wider than target: crop sides
-                                let scaledTargetWidth = effectiveHeight * targetAR
-                                let trimFromSides = (effectiveWidth - scaledTargetWidth) / 2
-                                visibleRect = CGRect(
-                                    x: effectiveRect.minX + trimFromSides,
-                                    y: effectiveRect.minY,
-                                    width: effectiveWidth - (2 * trimFromSides),
-                                    height: effectiveHeight
-                                )
-                            } else if currentAR < targetAR {
-                                // Current is taller than target: crop top/bottom
-                                let scaledTargetHeight = effectiveWidth / targetAR
-                                let trimFromTopBottom = (effectiveHeight - scaledTargetHeight) / 2
-                                visibleRect = CGRect(
-                                    x: effectiveRect.minX,
-                                    y: effectiveRect.minY + trimFromTopBottom,
-                                    width: effectiveWidth,
-                                    height: effectiveHeight - (2 * trimFromTopBottom)
-                                )
-                            }
-                            
-                            // Only draw overlay if aspect ratios don't match (with small tolerance)
-                            if abs(currentAR - targetAR) > 0.01 {
-                                ctx.saveGState()
-                                
-                                // Draw dark overlay for areas that would be cropped in fill mode
-                                ctx.setFillColor(NSColor.black.withAlphaComponent(0.4).cgColor)
-                                
-                                // Draw overlay for areas outside the visible rect but inside the effective rect
-                                // Top area (if needed)
-                                if visibleRect.minY > effectiveRect.minY {
-                                    ctx.fill(CGRect(
-                                        x: effectiveRect.minX,
-                                        y: effectiveRect.minY,
-                                        width: effectiveRect.width,
-                                        height: visibleRect.minY - effectiveRect.minY
-                                    ))
-                                }
-                                
-                                // Bottom area (if needed)
-                                if visibleRect.maxY < effectiveRect.maxY {
-                                    ctx.fill(CGRect(
-                                        x: effectiveRect.minX,
-                                        y: visibleRect.maxY,
-                                        width: effectiveRect.width,
-                                        height: effectiveRect.maxY - visibleRect.maxY
-                                    ))
-                                }
-                                
-                                // Left area (if needed)
-                                if visibleRect.minX > effectiveRect.minX {
-                                    ctx.fill(CGRect(
-                                        x: effectiveRect.minX,
-                                        y: visibleRect.minY,
-                                        width: visibleRect.minX - effectiveRect.minX,
-                                        height: visibleRect.height
-                                    ))
-                                }
-                                
-                                // Right area (if needed)
-                                if visibleRect.maxX < effectiveRect.maxX {
-                                    ctx.fill(CGRect(
-                                        x: visibleRect.maxX,
-                                        y: visibleRect.minY,
-                                        width: effectiveRect.maxX - visibleRect.maxX,
-                                        height: visibleRect.height
-                                    ))
-                                }
-                                
-                                // Draw white 1pt border around visible area
-                                ctx.setStrokeColor(NSColor.white.cgColor)
-                                ctx.setLineWidth(1.0)
-                                ctx.stroke(visibleRect)
-                                
-                                ctx.restoreGState()
-                            }
-                        }
-                        
-                        // Draw pagination control if there's more than one page
-                        let pageCount = pdfDocument.pageCount
-                        if pageCount > 1 {
-                            // Create a translucent background for pagination control
-                            let controlHeight: CGFloat = 26
-                            let controlWidth: CGFloat = 100
-                            let controlY: CGFloat = 8
-                            let controlX: CGFloat = (thumbSize.width - controlWidth) / 2
-                            
-                            // Draw background
-                            ctx.saveGState()
-                            ctx.setFillColor(NSColor.black.withAlphaComponent(0.5).cgColor)
-                            let controlRect = CGRect(x: controlX, y: controlY, width: controlWidth, height: controlHeight)
-                            let path = NSBezierPath(roundedRect: controlRect, xRadius: 6, yRadius: 6)
-                            path.fill()
-                            
-                            // Draw page text
-                            let pageText = "\(pageIndex + 1) of \(pageCount)"
-                            let paragraphStyle = NSMutableParagraphStyle()
-                            paragraphStyle.alignment = .center
-                            let attributes: [NSAttributedString.Key: Any] = [
-                                .font: NSFont.systemFont(ofSize: 12),
-                                .foregroundColor: NSColor.white,
-                                .paragraphStyle: paragraphStyle
-                            ]
-                            
-                            let textSize = pageText.size(withAttributes: attributes)
-                            let textX = controlX + (controlWidth - textSize.width) / 2
-                            let textY = controlY + (controlHeight - textSize.height) / 2
-                            
-                            pageText.draw(at: NSPoint(x: textX, y: textY), withAttributes: attributes)
-                            
-                            // Draw left arrow if not on first page
-                            if pageIndex > 0 {
-                                let arrowLeft = "←"
-                                let arrowAttributes: [NSAttributedString.Key: Any] = [
-                                    .font: NSFont.systemFont(ofSize: 14, weight: .medium),
-                                    .foregroundColor: NSColor.white
-                                ]
-                                let arrowSize = arrowLeft.size(withAttributes: arrowAttributes)
-                                let arrowX = controlX + 10
-                                let arrowY = controlY + (controlHeight - arrowSize.height) / 2
-                                arrowLeft.draw(at: NSPoint(x: arrowX, y: arrowY), withAttributes: arrowAttributes)
-                            }
-                            
-                            // Draw right arrow if not on last page
-                            if pageIndex < pageCount - 1 {
-                                let arrowRight = "→"
-                                let arrowAttributes: [NSAttributedString.Key: Any] = [
-                                    .font: NSFont.systemFont(ofSize: 14, weight: .medium),
-                                    .foregroundColor: NSColor.white
-                                ]
-                                let arrowSize = arrowRight.size(withAttributes: arrowAttributes)
-                                let arrowX = controlX + controlWidth - arrowSize.width - 10
-                                let arrowY = controlY + (controlHeight - arrowSize.height) / 2
-                                arrowRight.draw(at: NSPoint(x: arrowX, y: arrowY), withAttributes: arrowAttributes)
-                            }
-                            
-                            ctx.restoreGState()
-                        }
+                    // Calculate scaling and positioning
+                    let scale: CGFloat
+                    if resizeMode == .fillSize && showFillPreview {
+                        scale = max(previewSize.width / effectiveRect.width, previewSize.height / effectiveRect.height)
+                    } else {
+                        scale = min(previewSize.width / effectiveRect.width, previewSize.height / effectiveRect.height)
                     }
                     
-                    image.unlockFocus()
+                    let scaledWidth = effectiveRect.width * scale
+                    let scaledHeight = effectiveRect.height * scale
+                    let offsetX = (previewSize.width - scaledWidth) / 2
+                    let offsetY = (previewSize.height - scaledHeight) / 2
+                    
+                    // Apply transformations
+                    context.saveGState()
+                    context.translateBy(x: offsetX, y: offsetY)
+                    context.scaleBy(x: scale, y: scale)
+                    context.translateBy(x: -effectiveRect.minX, y: -effectiveRect.minY)
+                    
+                    // Apply clipping if using bleed trim
+                    if bleedTrimAmount > 0 {
+                        context.clip(to: effectiveRect)
+                    }
+                    
+                    // Draw the PDF page
+                    pdfPage.draw(with: .mediaBox, to: context)
+                    context.restoreGState()
+                }
+                
+                image.unlockFocus()
+                
+                // Safely assign the result
+                DispatchQueue.main.sync {
                     resultImage = image
                 }
-            } // End of autoreleasepool
-            
-            group.leave()
+            }
         }
         
-        // Wait for the result with a reasonable timeout
-        if group.wait(timeout: .now() + 2.0) == .timedOut {
-            print("Warning: PDF thumbnail generation timed out after 2 seconds")
-            // Return a placeholder image in case of timeout
-            let placeholder = NSImage(size: NSSize(width: 250, height: 200))
-            placeholder.lockFocus()
-            NSColor.lightGray.set()
-            NSRect(x: 0, y: 0, width: 250, height: 200).fill()
-            NSColor.darkGray.set()
-            "PDF Preview Unavailable".draw(
-                at: NSPoint(x: 50, y: 90),
-                withAttributes: [.font: NSFont.systemFont(ofSize: 12)]
-            )
-            placeholder.unlockFocus()
-            return placeholder
-        }
-        
+        // Wait for completion
+        group.wait()
         return resultImage
     }
 }
