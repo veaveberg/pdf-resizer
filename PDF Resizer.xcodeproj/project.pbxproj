@@ -1,0 +1,573 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXContainerItemProxy section */
+		5F2C1EF22DD675DF0021F378 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 5F2C1EDA2DD675DE0021F378 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5F2C1EE12DD675DE0021F378;
+			remoteInfo = SamshaResizer;
+		};
+		5F2C1EFC2DD675DF0021F378 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 5F2C1EDA2DD675DE0021F378 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5F2C1EE12DD675DE0021F378;
+			remoteInfo = SamshaResizer;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		5F2C1EE22DD675DE0021F378 /* PDF Resizer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "PDF Resizer.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		5F2C1EF12DD675DF0021F378 /* PDF ResizerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "PDF ResizerTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		5F2C1EFB2DD675DF0021F378 /* PDF ResizerUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "PDF ResizerUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		5F2C1EE42DD675DE0021F378 /* pdf-resizer */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "pdf-resizer";
+			sourceTree = "<group>";
+		};
+		5F2C1EF42DD675DF0021F378 /* pdf-resizer-tests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "pdf-resizer-tests";
+			sourceTree = "<group>";
+		};
+		5F2C1EFE2DD675DF0021F378 /* pdf-resizer-UITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "pdf-resizer-UITests";
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		5F2C1EDF2DD675DE0021F378 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5F2C1EEE2DD675DF0021F378 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5F2C1EF82DD675DF0021F378 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		5F2C1ED92DD675DE0021F378 = {
+			isa = PBXGroup;
+			children = (
+				5F2C1EE42DD675DE0021F378 /* pdf-resizer */,
+				5F2C1EF42DD675DF0021F378 /* pdf-resizer-tests */,
+				5F2C1EFE2DD675DF0021F378 /* pdf-resizer-UITests */,
+				5F2C1EE32DD675DE0021F378 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		5F2C1EE32DD675DE0021F378 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				5F2C1EE22DD675DE0021F378 /* PDF Resizer.app */,
+				5F2C1EF12DD675DF0021F378 /* PDF ResizerTests.xctest */,
+				5F2C1EFB2DD675DF0021F378 /* PDF ResizerUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		5F2C1EE12DD675DE0021F378 /* PDF Resizer */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5F2C1F052DD675DF0021F378 /* Build configuration list for PBXNativeTarget "PDF Resizer" */;
+			buildPhases = (
+				5F2C1EDE2DD675DE0021F378 /* Sources */,
+				5F2C1EDF2DD675DE0021F378 /* Frameworks */,
+				5F2C1EE02DD675DE0021F378 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				5F2C1EE42DD675DE0021F378 /* pdf-resizer */,
+			);
+			name = "PDF Resizer";
+			packageProductDependencies = (
+			);
+			productName = SamshaResizer;
+			productReference = 5F2C1EE22DD675DE0021F378 /* PDF Resizer.app */;
+			productType = "com.apple.product-type.application";
+		};
+		5F2C1EF02DD675DF0021F378 /* PDF ResizerTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5F2C1F082DD675DF0021F378 /* Build configuration list for PBXNativeTarget "PDF ResizerTests" */;
+			buildPhases = (
+				5F2C1EED2DD675DF0021F378 /* Sources */,
+				5F2C1EEE2DD675DF0021F378 /* Frameworks */,
+				5F2C1EEF2DD675DF0021F378 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				5F2C1EF32DD675DF0021F378 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				5F2C1EF42DD675DF0021F378 /* pdf-resizer-tests */,
+			);
+			name = "PDF ResizerTests";
+			packageProductDependencies = (
+			);
+			productName = SamshaResizerTests;
+			productReference = 5F2C1EF12DD675DF0021F378 /* PDF ResizerTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		5F2C1EFA2DD675DF0021F378 /* PDF ResizerUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5F2C1F0B2DD675DF0021F378 /* Build configuration list for PBXNativeTarget "PDF ResizerUITests" */;
+			buildPhases = (
+				5F2C1EF72DD675DF0021F378 /* Sources */,
+				5F2C1EF82DD675DF0021F378 /* Frameworks */,
+				5F2C1EF92DD675DF0021F378 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				5F2C1EFD2DD675DF0021F378 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				5F2C1EFE2DD675DF0021F378 /* pdf-resizer-UITests */,
+			);
+			name = "PDF ResizerUITests";
+			packageProductDependencies = (
+			);
+			productName = SamshaResizerUITests;
+			productReference = 5F2C1EFB2DD675DF0021F378 /* PDF ResizerUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		5F2C1EDA2DD675DE0021F378 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1630;
+				LastUpgradeCheck = 1630;
+				TargetAttributes = {
+					5F2C1EE12DD675DE0021F378 = {
+						CreatedOnToolsVersion = 16.3;
+					};
+					5F2C1EF02DD675DF0021F378 = {
+						CreatedOnToolsVersion = 16.3;
+						TestTargetID = 5F2C1EE12DD675DE0021F378;
+					};
+					5F2C1EFA2DD675DF0021F378 = {
+						CreatedOnToolsVersion = 16.3;
+						TestTargetID = 5F2C1EE12DD675DE0021F378;
+					};
+				};
+			};
+			buildConfigurationList = 5F2C1EDD2DD675DE0021F378 /* Build configuration list for PBXProject "PDF Resizer" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 5F2C1ED92DD675DE0021F378;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 5F2C1EE32DD675DE0021F378 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				5F2C1EE12DD675DE0021F378 /* PDF Resizer */,
+				5F2C1EF02DD675DF0021F378 /* PDF ResizerTests */,
+				5F2C1EFA2DD675DF0021F378 /* PDF ResizerUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		5F2C1EE02DD675DE0021F378 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5F2C1EEF2DD675DF0021F378 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5F2C1EF92DD675DF0021F378 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		5F2C1EDE2DD675DE0021F378 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5F2C1EED2DD675DF0021F378 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5F2C1EF72DD675DF0021F378 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		5F2C1EF32DD675DF0021F378 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5F2C1EE12DD675DE0021F378 /* PDF Resizer */;
+			targetProxy = 5F2C1EF22DD675DF0021F378 /* PBXContainerItemProxy */;
+		};
+		5F2C1EFD2DD675DF0021F378 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5F2C1EE12DD675DE0021F378 /* PDF Resizer */;
+			targetProxy = 5F2C1EFC2DD675DF0021F378 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		5F2C1F032DD675DF0021F378 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = 6374F9LV3M;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.4;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		5F2C1F042DD675DF0021F378 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = 6374F9LV3M;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.4;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		5F2C1F062DD675DF0021F378 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "pdf-resizer/pdf-resizer.entitlements";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 2;
+				DEVELOPMENT_TEAM = 6374F9LV3M;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				INFOPLIST_KEY_NSDownloadsFolderUsageDescription = "";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = "samshabrg.pdf-resizer";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		5F2C1F072DD675DF0021F378 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "pdf-resizer/pdf-resizer.entitlements";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 2;
+				DEVELOPMENT_TEAM = 6374F9LV3M;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				INFOPLIST_KEY_NSDownloadsFolderUsageDescription = "";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = "samshabrg.pdf-resizer";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		5F2C1F092DD675DF0021F378 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 6374F9LV3M;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.4;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = samshabrg.SamshaResizerTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/PDF Resizer.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/PDF Resizer";
+			};
+			name = Debug;
+		};
+		5F2C1F0A2DD675DF0021F378 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 6374F9LV3M;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.4;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = samshabrg.SamshaResizerTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/PDF Resizer.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/PDF Resizer";
+			};
+			name = Release;
+		};
+		5F2C1F0C2DD675DF0021F378 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 6374F9LV3M;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = samshabrg.SamshaResizerUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = SamshaResizer;
+			};
+			name = Debug;
+		};
+		5F2C1F0D2DD675DF0021F378 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 6374F9LV3M;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = samshabrg.SamshaResizerUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = SamshaResizer;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		5F2C1EDD2DD675DE0021F378 /* Build configuration list for PBXProject "PDF Resizer" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5F2C1F032DD675DF0021F378 /* Debug */,
+				5F2C1F042DD675DF0021F378 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		5F2C1F052DD675DF0021F378 /* Build configuration list for PBXNativeTarget "PDF Resizer" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5F2C1F062DD675DF0021F378 /* Debug */,
+				5F2C1F072DD675DF0021F378 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		5F2C1F082DD675DF0021F378 /* Build configuration list for PBXNativeTarget "PDF ResizerTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5F2C1F092DD675DF0021F378 /* Debug */,
+				5F2C1F0A2DD675DF0021F378 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		5F2C1F0B2DD675DF0021F378 /* Build configuration list for PBXNativeTarget "PDF ResizerUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5F2C1F0C2DD675DF0021F378 /* Debug */,
+				5F2C1F0D2DD675DF0021F378 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 5F2C1EDA2DD675DE0021F378 /* Project object */;
+}
