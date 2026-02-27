@@ -4,7 +4,7 @@ import svgr from 'vite-plugin-svgr';
 
 // https://vitejs.dev/config/
 export default defineConfig({
-  base: process.env.TAURI_BUILD ? "/" : "/pdf-resizer/",
+  base: "./",
   plugins: [react(), svgr()],
   publicDir: "./public",
   build: {
