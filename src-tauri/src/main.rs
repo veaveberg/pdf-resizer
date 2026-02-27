@@ -4,7 +4,7 @@
 )]
 
 use std::path::Path;
-use std::process::Command;
+use tauri::api::process::Command as SidecarCommand;
 
 #[tauri::command]
 fn check_file_existence(file_paths: Vec<String>) -> Vec<bool> {
@@ -24,22 +24,20 @@ fn log_path(path: String) {
     println!("Received path from frontend: {}", path);
 }
 
-/// Check if Ghostscript is available on the system.
-/// Returns the version string if found, or an empty string if not.
+/// Check if Ghostscript is available (via bundled sidecar).
 #[tauri::command]
 fn check_ghostscript() -> String {
-    let result = Command::new("gs").arg("--version").output();
+    let result = SidecarCommand::new_sidecar("gs")
+        .map(|cmd| cmd.args(["--version"]).output())
+        .map_err(|e| e.to_string());
+
     match result {
-        Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
-        }
+        Ok(Ok(output)) if output.status.success() => output.stdout.trim().to_string(),
         _ => String::new(),
     }
 }
 
-/// Flatten a PDF using Ghostscript's -dNoOutputFonts flag.
-/// Converts all text to vector outlines, preserving vector graphics.
-/// Takes source PDF bytes, returns flattened PDF bytes.
+/// Flatten a PDF using bundled Ghostscript sidecar.
 #[tauri::command]
 fn flatten_pdf(pdf_bytes: Vec<u8>) -> Result<Vec<u8>, String> {
     use std::io::Write;
@@ -53,8 +51,9 @@ fn flatten_pdf(pdf_bytes: Vec<u8>) -> Result<Vec<u8>, String> {
         .and_then(|mut f| f.write_all(&pdf_bytes))
         .map_err(|e| format!("Failed to write temp input file: {}", e))?;
 
-    // Run Ghostscript
-    let result = Command::new("gs")
+    // Run Ghostscript sidecar
+    let result = SidecarCommand::new_sidecar("gs")
+        .map_err(|e| format!("Failed to create sidecar command: {}", e))?
         .args([
             "-dBATCH",
             "-dNOPAUSE",
@@ -67,10 +66,10 @@ fn flatten_pdf(pdf_bytes: Vec<u8>) -> Result<Vec<u8>, String> {
             &format!("{}", input_path.display()),
         ])
         .output()
-        .map_err(|e| format!("Failed to run Ghostscript: {}", e))?;
+        .map_err(|e| format!("Failed to run Ghostscript sidecar: {}", e))?;
 
     if !result.status.success() {
-        let stderr = String::from_utf8_lossy(&result.stderr);
+        let stderr = result.stderr;
         let _ = std::fs::remove_file(&input_path);
         let _ = std::fs::remove_file(&output_path);
         return Err(format!("Ghostscript failed: {}", stderr));

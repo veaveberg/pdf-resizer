@@ -17,8 +17,10 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
+            target: universal-apple-darwin
             args: --target universal-apple-darwin
           - platform: windows-latest
+            target: x86_64-pc-windows-msvc
             args: ""
 
     runs-on: ${{ matrix.platform }}
@@ -41,11 +43,25 @@ jobs:
         with:
           prefix-key: "v1"
 
-      - name: install dependencies (ubuntu only)
-        if: matrix.platform == 'ubuntu-latest'
+      - name: Install Ghostscript (macOS)
+        if: matrix.platform == 'macos-latest'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev libappindicator3-dev librsvg2-dev patchelf
+          brew install ghostscript
+          mkdir -p src-tauri/bin
+          # Create sidecars for both architectures
+          cp $(which gs) src-tauri/bin/gs-x86_64-apple-darwin
+          cp $(which gs) src-tauri/bin/gs-aarch64-apple-darwin
+          # For universal build we often need them to exist at these exact names
+          # but the target universal-apple-darwin is special.
+          # We'll also provide the target specific one.
+          cp $(which gs) src-tauri/bin/gs-universal-apple-darwin
+
+      - name: Install Ghostscript (Windows)
+        if: matrix.platform == 'windows-latest'
+        run: |
+          choco install ghostscript
+          mkdir src-tauri/bin
+          cp "C:\Program Files\gs\gs*\bin\gswin64c.exe" src-tauri/bin/gs-x86_64-pc-windows-msvc.exe
 
       - name: install frontend dependencies
         run: npm install
