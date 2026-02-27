@@ -152,6 +152,8 @@ function PDFDropZone() {
   });
   const [showPresetsEditor, setShowPresetsEditor] = useState(false);
   const [newPresetState, setNewPresetState] = useState({ name: '', width: '', height: '' });
+  const [flatten, setFlatten] = useState(false);
+  const [ghostscriptAvailable, setGhostscriptAvailable] = useState(false);
 
   // Persistence effects
   useEffect(() => {
@@ -161,6 +163,22 @@ function PDFDropZone() {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY_ADJUSTERS, JSON.stringify(adjusters));
   }, [adjusters]);
+
+  // Detect Ghostscript availability (Tauri only)
+  useEffect(() => {
+    const checkGs = async () => {
+      try {
+        const isTauriEnv = typeof window !== 'undefined' && Boolean((window as any).__TAURI_IPC__);
+        if (isTauriEnv) {
+          const version: string = await invoke('check_ghostscript');
+          setGhostscriptAvailable(Boolean(version));
+        }
+      } catch {
+        setGhostscriptAvailable(false);
+      }
+    };
+    checkGs();
+  }, []);
 
   // Sync local state with trim
   useEffect(() => {
@@ -556,7 +574,20 @@ function PDFDropZone() {
 
   // Helper function to perform the actual PDF saving
   const performSave = async (folder: string, adjustersToSave: Adjuster[], pagesToProcess: number[], fileToSave: File, baseFileName: string, currentTrim: number, currentPageNum: number, pageSelectionType: 'single' | 'all', dirHandle?: any) => {
-    const arrayBuffer = await fileToSave.arrayBuffer();
+    let arrayBuffer = await fileToSave.arrayBuffer();
+
+    // Pre-process: flatten via Ghostscript if enabled (Tauri only)
+    if (flatten && isTauri) {
+      try {
+        const flattenedBytes: number[] = await invoke('flatten_pdf', {
+          pdfBytes: Array.from(new Uint8Array(arrayBuffer))
+        });
+        arrayBuffer = new Uint8Array(flattenedBytes).buffer;
+      } catch (e: any) {
+        throw new Error(`Flatten failed: ${e}`);
+      }
+    }
+
     const pdfDoc = await PDFDocument.load(arrayBuffer);
 
     for (const adj of adjustersToSave) {
@@ -1216,6 +1247,40 @@ function PDFDropZone() {
             <PlusCircleFill style={{ width: 20, height: 20, display: 'block', color: 'var(--secondary-color)' }} />
             <span style={{ color: 'var(--text-color)' }}>Add Size</span>
           </button>
+        </div>
+      )}
+      {/* Export options section */}
+      {file && (
+        <div style={{
+          width: 400,
+          maxWidth: '100%',
+          margin: '24px auto 0 auto',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'flex-start',
+        }}>
+          <label
+            title={!isTauri ? 'Requires desktop app with Ghostscript installed' :
+                   !ghostscriptAvailable ? 'Ghostscript not found. Install with: brew install ghostscript' : undefined}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              fontWeight: 500,
+              fontSize: 16,
+              color: 'var(--text-color)',
+              cursor: (isTauri && ghostscriptAvailable) ? 'pointer' : 'not-allowed',
+              opacity: (isTauri && ghostscriptAvailable) ? 1 : 0.5,
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={flatten}
+              onChange={e => setFlatten(e.target.checked)}
+              disabled={!isTauri || !ghostscriptAvailable}
+              style={{ marginRight: 8 }}
+            />
+            Flatten
+          </label>
         </div>
       )}
       {/* Filename Editor Section */}
