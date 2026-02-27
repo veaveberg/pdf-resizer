@@ -6,7 +6,7 @@
     "distDir": "../dist"
   },
   "package": {
-    "productName": "pdfresizer-tauri",
+    "productName": "PDF Resizer",
     "version": "0.0.4"
   },
   "tauri": {

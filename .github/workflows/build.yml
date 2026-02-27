@@ -61,12 +61,26 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+          includeRelease: false
 
-      - name: Upload Portable EXE (Windows)
+      - name: Upload Assets (macOS Universal)
+        if: matrix.platform == 'macos-latest'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            src-tauri/target/universal-apple-darwin/release/bundle/dmg/PDF Resizer.dmg
+          tag_name: v${{ steps.tauri-action.outputs.appVersion }}
+          draft: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Assets (Windows Portable)
         if: matrix.platform == 'windows-latest'
         uses: softprops/action-gh-release@v2
         with:
-          files: src-tauri/target/release/pdfresizer-tauri.exe
+          files: |
+            src-tauri/target/release/PDF Resizer.exe
           tag_name: v${{ steps.tauri-action.outputs.appVersion }}
+          draft: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
