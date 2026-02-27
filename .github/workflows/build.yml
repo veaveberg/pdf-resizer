@@ -58,10 +58,13 @@ jobs:
 
       - name: Install Ghostscript (Windows)
         if: matrix.platform == 'windows-latest'
+        shell: pwsh
         run: |
-          choco install ghostscript
-          mkdir src-tauri/bin
-          cp "C:\Program Files\gs\gs*\bin\gswin64c.exe" src-tauri/bin/gs-x86_64-pc-windows-msvc.exe
+          choco install ghostscript -y
+          New-Item -ItemType Directory -Force -Path src-tauri/bin | Out-Null
+          $gsExe = Get-ChildItem "C:\Program Files\gs\*\bin\gswin64c.exe" | Select-Object -First 1
+          if (-not $gsExe) { throw "Ghostscript executable not found." }
+          Copy-Item $gsExe.FullName "src-tauri/bin/gs-x86_64-pc-windows-msvc.exe" -Force
 
       - name: install frontend dependencies
         run: npm install
@@ -79,12 +82,31 @@ jobs:
           args: ${{ matrix.args }}
           includeRelease: false
 
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}-${{ matrix.target }}
+          if-no-files-found: error
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.app
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.dmg
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.msi
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.exe
+            src-tauri/target/release/bundle/**/*.app
+            src-tauri/target/release/bundle/**/*.dmg
+            src-tauri/target/release/bundle/**/*.msi
+            src-tauri/target/release/bundle/**/*.exe
+            src-tauri/target/release/PDF Resizer.exe
+
       - name: Upload Assets (macOS Universal)
         if: matrix.platform == 'macos-latest'
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            src-tauri/target/universal-apple-darwin/release/bundle/dmg/PDF Resizer.dmg
+            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app
+            src-tauri/target/release/bundle/macos/*.app
           tag_name: v${{ steps.tauri-action.outputs.appVersion }}
           draft: true
         env:
@@ -95,6 +117,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/**/*.msi
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/**/*.exe
+            src-tauri/target/release/bundle/**/*.msi
+            src-tauri/target/release/bundle/**/*.exe
             src-tauri/target/release/PDF Resizer.exe
           tag_name: v${{ steps.tauri-action.outputs.appVersion }}
           draft: true
