@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React, { useRef, useState } from 'react';
 import ArrowCounterclockwiseCircleFill from './assets/arrow.counterclockwise.circle.fill.svg?react';
 
 interface FileNameEditorProps {
@@ -13,6 +13,7 @@ interface FileNameEditorProps {
 const SIZE_TOKEN = '*size*';
 const YYMMDD_TOKEN = '*YYMMDD*';
 const DDMMYY_TOKEN = '*DDMMYY*';
+const TOKEN_OR_CANDIDATE_REGEX = /(\*size\*|\*YYMMDD\*|\*DDMMYY\*)|(?<!\d)\d+[xх]\d+(?!\d)|(?<!\d)\d{6}(?!\d)|(?<![A-Za-zА-Яа-я0-9])[AА][0-5][hv]?(?![A-Za-zА-Яа-я0-9])/g;
 
 function stringContainsSizePattern(text: string): boolean {
   // Match _100x200_ or _100x200 or 100x200_ or 100x200 (word boundaries)
@@ -27,20 +28,67 @@ function stringContainsDatePattern(text: string): boolean {
   return /(?<!\d)\d{6}(?!\d)/.test(text);
 }
 function replaceSizePattern(text: string, token: string): string {
-  const regexSizePattern = /(_\d+[xх]\d+_)|(_\d+[xх]\d+$)|(^\d+[xх]\d+_)|(\b\d+[xх]\d+\b)/g;
-  let replaced = text.replace(regexSizePattern, token);
+  let replaced = text
+    // Keep separators around the replaced token.
+    .replace(/(_)\d+[xх]\d+(_)/g, `$1${token}$2`)
+    .replace(/(_)\d+[xх]\d+(?=$)/g, `$1${token}`)
+    .replace(/(?<=^)\d+[xх]\d+(_)/g, `${token}$1`)
+    .replace(/\b\d+[xх]\d+\b/g, token);
   if (replaced !== text) return replaced;
-  // Try A-series
-  const regexPaper = /(^|[_\-\s])[AА][0-5][hv]?($|[_\-\s])/g;
-  return text.replace(regexPaper, token);
+  // Try A-series and keep separators.
+  const regexPaper = /(^|[_\-\s])([AА][0-5][hv]?)($|[_\-\s])/g;
+  return text.replace(regexPaper, (_m, left, _paper, right) => `${left}${token}${right}`);
 }
 function replaceFirstDatePattern(text: string, token: string): string {
   const regex = /(?<!\d)\d{6}(?!\d)/;
   return text.replace(regex, token);
 }
 
+function renderHighlightedValue(text: string) {
+  const parts: Array<{ text: string; kind: 'normal' | 'token' | 'candidate' }> = [];
+  let cursor = 0;
+  for (const match of text.matchAll(TOKEN_OR_CANDIDATE_REGEX)) {
+    const part = match[0];
+    const start = match.index ?? 0;
+    const end = start + part.length;
+    if (start > cursor) {
+      parts.push({ text: text.slice(cursor, start), kind: 'normal' });
+    }
+    const isToken =
+      part === SIZE_TOKEN ||
+      part === YYMMDD_TOKEN ||
+      part === DDMMYY_TOKEN;
+    parts.push({ text: part, kind: isToken ? 'token' : 'candidate' });
+    cursor = end;
+  }
+  if (cursor < text.length) {
+    parts.push({ text: text.slice(cursor), kind: 'normal' });
+  }
+
+  return parts.map((part, idx) => {
+    const isToken = part.kind === 'token';
+    const isCandidate = part.kind === 'candidate';
+    return (
+      <span
+        key={`${part.text}-${idx}`}
+        style={{
+          color: isToken ? 'var(--link-color)' : 'var(--text-color)',
+          fontWeight: 400,
+          background: isToken
+            ? 'color-mix(in srgb, var(--link-color) 14%, transparent)'
+            : (isCandidate ? 'var(--filename-candidate-highlight)' : 'transparent'),
+          borderRadius: (isToken || isCandidate) ? 4 : 0,
+        }}
+      >
+        {part.text}
+      </span>
+    );
+  });
+}
+
 const FileNameEditor: React.FC<FileNameEditorProps> = ({ value, originalValue, onChange, disabled, onRestore }) => {
   const inputRef = useRef<HTMLInputElement>(null);
+  const [inputScrollLeft, setInputScrollLeft] = useState(0);
 
   // --- Token insert handlers ---
   const insertToken = (token: string) => {
@@ -72,26 +120,74 @@ const FileNameEditor: React.FC<FileNameEditorProps> = ({ value, originalValue, o
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', width: 400, maxWidth: '100%', margin: '24px auto 0 auto' }}>
       <label style={{ fontWeight: 500, fontSize: 16, marginBottom: 6, color: 'var(--text-color)' }}>Filename:</label>
       <div style={{ display: 'flex', alignItems: 'center' }}>
-        <input
-          ref={inputRef}
-          type="text"
-          value={value}
-          onChange={e => onChange(e.target.value)}
-          disabled={disabled}
+        <div
           style={{
+            position: 'relative',
             width: 400,
-            fontSize: 16,
-            padding: '6px 10px',
+            minWidth: 0,
             borderRadius: 8,
             border: '1px solid var(--input-border)',
             background: 'var(--input-bg)',
-            color: 'var(--text-color)',
-            minWidth: 0,
             boxSizing: 'border-box',
-            transition: 'border 0.2s',
           }}
-          spellCheck={false}
-        />
+        >
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              overflow: 'hidden',
+              borderRadius: 8,
+              pointerEvents: 'none',
+            }}
+          >
+          <div
+            style={{
+              position: 'absolute',
+              left: 0,
+              top: 0,
+              padding: '6px 10px',
+              fontFamily: 'inherit',
+              fontSize: 16,
+              fontWeight: 400,
+              lineHeight: '22px',
+              letterSpacing: 'inherit',
+              whiteSpace: 'pre',
+              boxSizing: 'border-box',
+              transform: `translateX(${-inputScrollLeft}px)`,
+            }}
+          >
+            {renderHighlightedValue(value)}
+          </div>
+          </div>
+          <input
+            ref={inputRef}
+            type="text"
+            value={value}
+            onChange={e => onChange(e.target.value)}
+            onScroll={e => setInputScrollLeft(e.currentTarget.scrollLeft)}
+            disabled={disabled}
+            style={{
+              width: '100%',
+              fontFamily: 'inherit',
+              fontSize: 16,
+              fontWeight: 400,
+              lineHeight: '22px',
+              letterSpacing: 'inherit',
+              padding: '6px 10px',
+              borderRadius: 8,
+              border: 'none',
+              background: 'transparent',
+              color: 'transparent',
+              caretColor: 'var(--text-color)',
+              minWidth: 0,
+              boxSizing: 'border-box',
+              transition: 'border 0.2s',
+              position: 'relative',
+              zIndex: 1,
+            }}
+            spellCheck={false}
+          />
+        </div>
         {value !== originalValue && !disabled && (
           <button
             type="button"

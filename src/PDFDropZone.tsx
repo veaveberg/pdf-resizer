@@ -5,15 +5,14 @@ import SizeAdjusterCard from './SizeAdjusterCard';
 import ArrowLeftArrowRight from './assets/arrow.left.arrow.right.svg?react';
 import MinusCircleFill from './assets/minus.circle.fill.svg?react';
 import PlusCircleFill from './assets/plus.circle.fill.svg?react';
-import ArrowCounterclockwiseCircleFill from './assets/arrow.counterclockwise.circle.fill.svg?react';
-import ArrowCounterclockwise from './assets/arrow.counterclockwise.svg?react';
 import FileNameEditor from './FileNameEditor';
 import SaveButtonWithStatus from './SaveButtonWithStatus';
 import './pdf-skeleton.css';
-import { PDFDocument } from 'pdf-lib';
-import { writeBinaryFile, exists } from '@tauri-apps/api/fs';
+import { PDFDocument, rgb } from 'pdf-lib';
+import { writeBinaryFile, readBinaryFile, exists } from '@tauri-apps/api/fs';
 import { open } from '@tauri-apps/api/dialog';
 import { invoke } from '@tauri-apps/api/tauri';
+import { listen } from '@tauri-apps/api/event';
 import PresetsEditor from './PresetsEditor';
 
 // Set the workerSrc to the local bundled worker URL for pdf.js
@@ -38,7 +37,33 @@ const SIZE_TOKEN = '*size*';
 const YYMMDD_TOKEN = '*YYMMDD*';
 const DDMMYY_TOKEN = '*DDMMYY*';
 
-function replaceFilenameTokens(name: string, width: number, height: number) {
+const PAPER_CODES_MM = [
+  { code: 'A0', width: 841, height: 1189 },
+  { code: 'A1', width: 594, height: 841 },
+  { code: 'A2', width: 420, height: 594 },
+  { code: 'A3', width: 297, height: 420 },
+  { code: 'A4', width: 210, height: 297 },
+  { code: 'A5', width: 148, height: 210 },
+];
+
+function getSizeCode(width: number, height: number, kind: 'pdf' | 'png' = 'pdf') {
+  if (kind === 'png') return `${Math.round(width)}x${Math.round(height)}`;
+  const orientation = width > height ? 'h' : 'v';
+  const tolerance = 0.8;
+  let best: { code: string; diff: number } | null = null;
+  for (const p of PAPER_CODES_MM) {
+    const d1 = Math.abs(width - p.width) + Math.abs(height - p.height);
+    const d2 = Math.abs(width - p.height) + Math.abs(height - p.width);
+    const diff = Math.min(d1, d2);
+    if (diff <= tolerance && (!best || diff < best.diff)) {
+      best = { code: p.code, diff };
+    }
+  }
+  if (best) return `${best.code}${orientation}`;
+  return `${Math.round(width)}x${Math.round(height)}`;
+}
+
+function replaceFilenameTokens(name: string, width: number, height: number, kind: 'pdf' | 'png' = 'pdf') {
   // Ensure tokens are surrounded by underscores if not already
   let result = name
     .replace(/\*size\*/g, '_*size*_')
@@ -48,8 +73,8 @@ function replaceFilenameTokens(name: string, width: number, height: number) {
   // Remove duplicate underscores from token insertion
   result = result.replace(/_+/g, '_');
 
-  // Replace *size* with e.g. 210x297
-  result = result.replace(/_\*size\*_/g, `_${Math.round(width)}x${Math.round(height)}_`);
+  // Replace *size* with paper code (e.g. A3h/A4v) when recognized, otherwise fallback to 210x297
+  result = result.replace(/_\*size\*_/g, `_${getSizeCode(width, height, kind)}_`);
   // Replace *YYMMDD* and *DDMMYY* with today's date
   const now = new Date();
   const y = now.getFullYear().toString().slice(-2);
@@ -74,9 +99,11 @@ function formatFileSize(bytes: number): string {
 
 function formatSizePoints(width: number, height: number): string {
   function fmt(val: number) {
-    return Number.isInteger(val)
-      ? val.toString().replace('.', ',')
-      : val.toFixed(1).replace('.', ',');
+    const rounded = Math.round(val * 10) / 10;
+    return rounded
+      .toFixed(1)
+      .replace(/\.0$/, '')
+      .replace('.', ',');
   }
   return `${fmt(width)} × ${fmt(height)} mm`;
 }
@@ -88,21 +115,121 @@ function getTrimmedSize(pdfSize: { width: number; height: number } | null, trimM
   return { width: trimmedWidth, height: trimmedHeight };
 }
 
+function getDirectoryFromPath(filePath: string): string {
+  if (!filePath) return '';
+  const normalized = filePath.replace(/\\/g, '/');
+  const idx = normalized.lastIndexOf('/');
+  if (idx <= 0) return '';
+  return normalized.slice(0, idx);
+}
+
+function getBaseNameFromPath(filePath: string): string {
+  if (!filePath) return 'imported-file';
+  const normalized = filePath.replace(/\\/g, '/');
+  const parts = normalized.split('/');
+  return parts[parts.length - 1] || 'imported-file';
+}
+
+function applyCanvasPaddingMask(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  paddingXPerSide: number,
+  paddingYPerSide: number = paddingXPerSide
+) {
+  if (paddingXPerSide <= 0 && paddingYPerSide <= 0) return;
+  const px = Math.max(0, Math.min(paddingXPerSide, width / 2));
+  const py = Math.max(0, Math.min(paddingYPerSide, height / 2));
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, width, py);
+  ctx.fillRect(0, height - py, width, py);
+  ctx.fillRect(0, py, px, Math.max(0, height - 2 * py));
+  ctx.fillRect(width - px, py, px, Math.max(0, height - 2 * py));
+}
+
+function applyPdfPaddingMask(page: any, width: number, height: number, paddingPerSide: number) {
+  if (paddingPerSide <= 0) return;
+  const p = Math.max(0, Math.min(paddingPerSide, Math.min(width, height) / 2));
+  const white = rgb(1, 1, 1);
+  page.drawRectangle({ x: 0, y: 0, width, height: p, color: white });
+  page.drawRectangle({ x: 0, y: height - p, width, height: p, color: white });
+  page.drawRectangle({ x: 0, y: p, width: p, height: Math.max(0, height - 2 * p), color: white });
+  page.drawRectangle({ x: width - p, y: p, width: p, height: Math.max(0, height - 2 * p), color: white });
+}
+
 interface Adjuster {
   id: string;
+  kind: 'pdf' | 'png';
   mode: string;
   width: number;
   height: number;
+  marginMm?: number;
+  paddingMode?: 'inside' | 'outside';
+  scaleFactor?: number;
+  ppi?: number;
+  pngSourceWidthMm?: number;
+  pngSourceHeightMm?: number;
+  pngLockField?: 'width' | 'height' | 'ppi';
   source: string;
+}
+
+interface ExportTask {
+  id: string;
+  kind: 'pdf' | 'png';
+  adjuster: Adjuster;
+  pages: number[];
+  pageIdx?: number;
+  outputBaseName: string;
+  extension: 'pdf' | 'png';
+}
+
+type SourceKind = 'pdf' | 'image' | null;
+const SUPPORTED_FORMATS_MESSAGE = 'Supported formats: .pdf, .ai, .png, .jpg/.jpeg and .heic/.heif';
+const PDF_MAX_DIMENSION_POINTS = 14400;
+const PDF_MIN_DIMENSION_POINTS = 1;
+const POINTS_PER_MM = 1 / MM_PER_POINT;
+const PDF_MAX_DIMENSION_MM = PDF_MAX_DIMENSION_POINTS * MM_PER_POINT;
+const PDF_MIN_DIMENSION_MM = PDF_MIN_DIMENSION_POINTS * MM_PER_POINT;
+
+function getPaddingLayoutMm(adjuster: Adjuster) {
+  const setWidthMm = Math.max(1, Number(adjuster.width));
+  const setHeightMm = Math.max(1, Number(adjuster.height));
+  const paddingMm = Math.max(0, Number(adjuster.marginMm ?? 0));
+  const paddingMode = adjuster.paddingMode === 'outside' ? 'outside' : 'inside';
+  if (paddingMode === 'outside') {
+    return {
+      paddingMode,
+      paddingMm,
+      pageWidthMm: setWidthMm + 2 * paddingMm,
+      pageHeightMm: setHeightMm + 2 * paddingMm,
+      contentWidthMm: setWidthMm,
+      contentHeightMm: setHeightMm,
+      contentOffsetMm: paddingMm,
+      maskPaddingMm: 0,
+    } as const;
+  }
+  return {
+    paddingMode,
+    paddingMm,
+    pageWidthMm: setWidthMm,
+    pageHeightMm: setHeightMm,
+    contentWidthMm: Math.max(setWidthMm - 2 * paddingMm, 1),
+    contentHeightMm: Math.max(setHeightMm - 2 * paddingMm, 1),
+    contentOffsetMm: paddingMm,
+    maskPaddingMm: paddingMm,
+  } as const;
 }
 
 function PDFDropZone() {
   const [file, setFile] = useState<File | null>(null);
+  const [sourceKind, setSourceKind] = useState<SourceKind>(null);
   const [fileName, setFileName] = useState('');
   const [originalFileName, setOriginalFileName] = useState('');
+  const [originalImportedName, setOriginalImportedName] = useState('');
   const [fileSize, setFileSize] = useState<number | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const [pdfSize, setPdfSize] = useState<{ width: number; height: number } | null>(null);
+  const [imageSizePx, setImageSizePx] = useState<{ width: number; height: number } | null>(null);
   const [trim, setTrim] = useState(0); // in mm
   const [currentPage, setCurrentPage] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
@@ -113,15 +240,51 @@ function PDFDropZone() {
 
   const STORAGE_KEY_PRESETS = 'pdf_resizer_presets';
   const STORAGE_KEY_ADJUSTERS = 'pdf_resizer_adjusters';
+  const SESSION_KEY_SCALE_FACTOR = 'pdf_resizer_scale_factor';
+
+  const [sessionScaleFactor, setSessionScaleFactor] = useState<number>(() => {
+    try {
+      const saved = sessionStorage.getItem(SESSION_KEY_SCALE_FACTOR);
+      if (!saved) return 1;
+      const parsed = Number(saved);
+      return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+    } catch {
+      return 1;
+    }
+  });
 
   const [adjusters, setAdjusters] = useState<Adjuster[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY_ADJUSTERS);
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed.map((adj: any) => ({
+            ...adj,
+            kind: adj?.kind === 'png' ? 'png' : 'pdf',
+            mode: adj?.mode === 'fit'
+              ? 'scale'
+              : (adj?.mode || 'fill'),
+            marginMm: adj?.kind === 'png' ? adj?.marginMm : Math.max(0, Number(adj?.marginMm ?? 0)),
+            paddingMode: adj?.kind === 'png' ? adj?.paddingMode : ((adj?.paddingMode === 'outside') ? 'outside' : 'inside'),
+            scaleFactor: adj?.kind === 'png' ? adj?.scaleFactor : Math.max(0.01, Number(adj?.scaleFactor ?? 1)),
+            ppi: adj?.kind === 'png' ? Math.max(1, Number(adj?.ppi ?? 300)) : adj?.ppi,
+            pngSourceWidthMm: adj?.kind === 'png'
+              ? Number(adj?.pngSourceWidthMm ?? ((Number(adj?.width) / Math.max(1, Number(adj?.ppi ?? 300))) * 25.4))
+              : adj?.pngSourceWidthMm,
+            pngSourceHeightMm: adj?.kind === 'png'
+              ? Number(adj?.pngSourceHeightMm ?? ((Number(adj?.height) / Math.max(1, Number(adj?.ppi ?? 300))) * 25.4))
+              : adj?.pngSourceHeightMm,
+            pngLockField: adj?.kind === 'png'
+              ? ((adj?.pngLockField === 'width' || adj?.pngLockField === 'height' || adj?.pngLockField === 'ppi') ? adj.pngLockField : 'ppi')
+              : adj?.pngLockField,
+          }));
+        }
+      }
     } catch (e) {
       console.error('Failed to load adjusters', e);
     }
-    return [{ id: crypto.randomUUID(), mode: 'fill', width: 210, height: 297, source: 'pdf' }];
+    return [{ id: crypto.randomUUID(), kind: 'pdf', mode: 'fill', width: 210, height: 297, marginMm: 0, paddingMode: 'inside', scaleFactor: 1, source: 'pdf' }];
   });
   const [trimInput, setTrimInput] = useState('0');
   const [isLoading, setIsLoading] = useState(false);
@@ -136,11 +299,15 @@ function PDFDropZone() {
   const [specifyExportLocation, setSpecifyExportLocation] = useState(false);
   const [showPopover, setShowPopover] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [conflictFiles, setConflictFiles] = useState<Array<{ fileName: string; isConflict: boolean; shouldOverwrite: boolean; originalPath?: string }>>([]);
+  const [unsupportedFormatMessage, setUnsupportedFormatMessage] = useState<string | null>(null);
+  const [conflictFiles, setConflictFiles] = useState<Array<{ fileName: string; isConflict: boolean; shouldOverwrite: boolean; originalPath?: string; taskId?: string }>>([]);
+  const [pendingExportTasks, setPendingExportTasks] = useState<ExportTask[]>([]);
   const [focusedAdjusterId, setFocusedAdjusterId] = useState<string | null>(null);
   const [cropOverlay, setCropOverlay] = useState<{ top: number; right: number; bottom: number; left: number } | null>(null);
   const [renderedPdfCssSize, setRenderedPdfCssSize] = useState<{ width: number; height: number } | null>(null);
   const [pdfRenderScale, setPdfRenderScale] = useState<number | null>(null);
+  const [resultPreviewFrame, setResultPreviewFrame] = useState<{ top: number; left: number; width: number; height: number } | null>(null);
+  const resultPreviewCanvasRef = useRef<HTMLCanvasElement>(null);
   const [presets, setPresets] = useState(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY_PRESETS);
@@ -163,6 +330,14 @@ function PDFDropZone() {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY_ADJUSTERS, JSON.stringify(adjusters));
   }, [adjusters]);
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(SESSION_KEY_SCALE_FACTOR, String(sessionScaleFactor));
+    } catch {
+      // Ignore storage write issues (private mode / restricted envs).
+    }
+  }, [sessionScaleFactor]);
 
   // Detect Ghostscript availability (Tauri only)
   useEffect(() => {
@@ -187,7 +362,11 @@ function PDFDropZone() {
 
   function formatTrim(val: number): string {
     if (!Number.isFinite(val)) return '';
-    return val.toFixed(2).replace('.', ',');
+    return val
+      .toFixed(2)
+      .replace('.', ',')
+      .replace(/,00$/, '')
+      .replace(/(,\d)0$/, '$1');
   }
   function formatTrimInput(val: string | number): string {
     if (typeof val === 'number') val = val.toString();
@@ -203,26 +382,103 @@ function PDFDropZone() {
     return Number(val.replace(',', '.'));
   }
 
-  // Handle file selection
-  const handleFiles = (files: FileList | null) => {
-    if (!files || files.length === 0) return;
-    const pdfFile = files[0];
-    if (pdfFile.type !== 'application/pdf') return;
-    setFile(pdfFile);
-    setFileName(pdfFile.name);
-    setOriginalFileName(pdfFile.name);
-    setFileSize(pdfFile.size);
+  const detectFileKind = (nameRaw: string, mimeRaw: string = ''): SourceKind => {
+    const name = (nameRaw || '').toLowerCase();
+    const mime = (mimeRaw || '').toLowerCase();
+    if (
+      mime === 'application/pdf' ||
+      name.endsWith('.pdf') ||
+      name.endsWith('.ai')
+    ) {
+      return 'pdf';
+    }
+    if (
+      mime.startsWith('image/') ||
+      name.endsWith('.heic') ||
+      name.endsWith('.heif') ||
+      name.endsWith('.avif') ||
+      name.endsWith('.webp') ||
+      name.endsWith('.jpg') ||
+      name.endsWith('.jpeg') ||
+      name.endsWith('.png') ||
+      name.endsWith('.gif') ||
+      name.endsWith('.bmp') ||
+      name.endsWith('.tif') ||
+      name.endsWith('.tiff')
+    ) {
+      return 'image';
+    }
+    return null;
+  };
+
+  const showUnsupportedFormatBanner = () => {
+    setUnsupportedFormatMessage(SUPPORTED_FORMATS_MESSAGE);
+    window.setTimeout(() => {
+      setUnsupportedFormatMessage(current => (current === SUPPORTED_FORMATS_MESSAGE ? null : current));
+    }, 3500);
+  };
+
+  const handleImportedFile = (nextFile: File, absolutePath?: string) => {
+    setDragActive(false);
+    const kind = detectFileKind(nextFile.name, nextFile.type);
+    if (!kind) {
+      showUnsupportedFormatBanner();
+      return;
+    }
+    setSourceKind(kind);
+    setFile(nextFile);
+    setFileName(nextFile.name);
+    setOriginalFileName(nextFile.name);
+    setOriginalImportedName(nextFile.name);
+    setFileSize(nextFile.size);
     setTrim(0);
     setCurrentPage(0);
     setTotalPages(1);
     setPdfSize(null);
+    setImageSizePx(null);
     pdfDocRef.current = null;
-    // Set export folder to imported PDF's location (Tauri only, if available)
-    if (isTauri && (pdfFile as any).path) {
-      const path = (pdfFile as any).path;
-      const folder = path.substring(0, path.lastIndexOf('/'));
-      setExportFolder(folder);
+    if (kind === 'image') {
+      setAdjusters(adjs => {
+        if (adjs.some(adj => adj.kind === 'png')) return adjs;
+        return [
+          ...adjs,
+          {
+            id: crypto.randomUUID(),
+            kind: 'png',
+            mode: 'fill',
+            width: 2500,
+            height: 2500,
+            ppi: 300,
+            source: 'png',
+          },
+        ];
+      });
     }
+    // Set export folder to imported file location (Tauri only, if available)
+    const filePath = absolutePath || (nextFile as any).path;
+    if (isTauri && filePath) {
+      const folder = getDirectoryFromPath(String(filePath));
+      if (folder) setExportFolder(folder);
+    }
+  };
+
+  // Handle file selection
+  const handleFiles = (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const nextFile = files[0];
+    handleImportedFile(nextFile);
+  };
+
+  const importFileByPath = async (absPath: string) => {
+    const maybeKind = detectFileKind(getBaseNameFromPath(absPath));
+    if (!maybeKind) {
+      showUnsupportedFormatBanner();
+      return;
+    }
+    const bytes = await readBinaryFile(absPath);
+    const fileNameFromPath = getBaseNameFromPath(absPath);
+    const imported = new File([bytes], fileNameFromPath);
+    handleImportedFile(imported, absPath);
   };
 
   // Render PDF preview using pdf.js
@@ -303,22 +559,77 @@ function PDFDropZone() {
     }
   };
 
+  const renderImagePreview = async (imageFile: File) => {
+    setIsLoading(true);
+    setRenderError(null);
+    try {
+      if (!canvasRef.current) return;
+      const canvas = canvasRef.current;
+      const dpr = window.devicePixelRatio || 1;
+      const previewContainerWidth = PREVIEW_WIDTH;
+      const previewContainerHeight = PREVIEW_HEIGHT;
+
+      let bitmap: ImageBitmap | null = null;
+      try {
+        bitmap = await createImageBitmap(imageFile);
+      } catch {
+        const objectUrl = URL.createObjectURL(imageFile);
+        try {
+          const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+            const node = new Image();
+            node.onload = () => resolve(node);
+            node.onerror = () => reject(new Error('Failed to decode image.'));
+            node.src = objectUrl;
+          });
+          bitmap = await createImageBitmap(img);
+        } finally {
+          URL.revokeObjectURL(objectUrl);
+        }
+      }
+      if (!bitmap) throw new Error('Failed to decode image.');
+
+      setImageSizePx({ width: bitmap.width, height: bitmap.height });
+      const scale = Math.min(previewContainerWidth / bitmap.width, previewContainerHeight / bitmap.height);
+      const drawW = Math.max(1, Math.round(bitmap.width * scale));
+      const drawH = Math.max(1, Math.round(bitmap.height * scale));
+      canvas.width = Math.max(1, Math.round(drawW * dpr));
+      canvas.height = Math.max(1, Math.round(drawH * dpr));
+      canvas.style.width = `${drawW}px`;
+      canvas.style.height = `${drawH}px`;
+      setRenderedPdfCssSize({ width: drawW, height: drawH });
+      setPdfRenderScale(null);
+
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('Failed to draw image preview.');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      bitmap.close();
+    } catch (err) {
+      console.error('Error loading image preview:', err);
+      setRenderError('Failed to load image. HEIC/HEIF support depends on your OS/browser codecs.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   // Use effect to render preview when file, canvas, or currentPage are ready
   useEffect(() => {
-    if (file && canvasRef.current) {
+    if (!file || !canvasRef.current || !sourceKind) return;
+    if (sourceKind === 'pdf') {
       renderPDFPreview(file, currentPage);
+    } else {
+      renderImagePreview(file);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [file, currentPage]);
+  }, [file, currentPage, sourceKind]);
 
   // --- Crop preview logic ---
   useEffect(() => {
-    if (!file || !pdfSize || !canvasRef.current || !renderedPdfCssSize || pdfRenderScale === null) {
+    if (sourceKind !== 'pdf' || !file || !pdfSize || !canvasRef.current || !renderedPdfCssSize || pdfRenderScale === null) {
       setCropOverlay(null);
       return;
     }
 
-    const POINTS_PER_MM = 1 / MM_PER_POINT;
     const trimPoints = trim * POINTS_PER_MM;
 
     // Calculate trim overlay based on the actual rendered PDF size
@@ -329,21 +640,23 @@ function PDFDropZone() {
       right: trimPoints * pdfRenderScale,
     };
 
-    const focusedAdjuster = adjusters.find(adj => adj.id === focusedAdjusterId);
-
-    if (focusedAdjuster && focusedAdjuster.mode === 'fill') {
-      const targetWidth = focusedAdjuster.width * POINTS_PER_MM;
-      const targetHeight = focusedAdjuster.height * POINTS_PER_MM;
+    const focusedAdjuster =
+      adjusters.find(adj => adj.id === focusedAdjusterId) ||
+      adjusters.find(adj => adj.kind === 'pdf');
+    if (focusedAdjuster && focusedAdjuster.kind === 'pdf' && focusedAdjuster.mode === 'fill') {
+      const layoutMm = getPaddingLayoutMm(focusedAdjuster);
+      const usableTargetWidth = layoutMm.contentWidthMm * POINTS_PER_MM;
+      const usableTargetHeight = layoutMm.contentHeightMm * POINTS_PER_MM;
 
       // Calculate the scale needed to fill the target dimensions, considering the trimmed PDF size
-      const effectivePdfWidth = pdfSize.width - 2 * trimPoints;
-      const effectivePdfHeight = pdfSize.height - 2 * trimPoints;
+      const effectivePdfWidth = Math.max(pdfSize.width * POINTS_PER_MM - 2 * trimPoints, 1);
+      const effectivePdfHeight = Math.max(pdfSize.height * POINTS_PER_MM - 2 * trimPoints, 1);
 
-      const fillScale = Math.max(targetWidth / effectivePdfWidth, targetHeight / effectivePdfHeight);
+      const fillScale = Math.max(usableTargetWidth / effectivePdfWidth, usableTargetHeight / effectivePdfHeight);
 
       // Calculate the excess area in PDF points that will be cropped by the fill operation
-      const excessWidthPoints = (effectivePdfWidth * fillScale - targetWidth) / 2;
-      const excessHeightPoints = (effectivePdfHeight * fillScale - targetHeight) / 2;
+      const excessWidthPoints = (effectivePdfWidth * fillScale - usableTargetWidth) / 2;
+      const excessHeightPoints = (effectivePdfHeight * fillScale - usableTargetHeight) / 2;
 
       // Add the excess cropping to the overlay, scaled to CSS pixels
       overlay.left += excessWidthPoints * pdfRenderScale;
@@ -354,11 +667,86 @@ function PDFDropZone() {
 
     setCropOverlay(overlay);
 
-  }, [file, pdfSize, trim, adjusters, focusedAdjusterId, renderedPdfCssSize, pdfRenderScale]);
+  }, [sourceKind, file, pdfSize, trim, adjusters, focusedAdjusterId, renderedPdfCssSize, pdfRenderScale]);
+
+  useEffect(() => {
+    if (!file || sourceKind !== 'pdf' || !renderedPdfCssSize || !canvasRef.current || !resultPreviewCanvasRef.current || !pdfSize || pdfRenderScale === null) {
+      setResultPreviewFrame(null);
+      return;
+    }
+    const focusedAdjuster =
+      adjusters.find(adj => adj.id === focusedAdjusterId) ||
+      adjusters.find(adj => adj.kind === 'pdf');
+    if (!focusedAdjuster || focusedAdjuster.kind !== 'pdf') {
+      setResultPreviewFrame(null);
+      return;
+    }
+    const layoutMm = getPaddingLayoutMm(focusedAdjuster);
+    const targetWmm = layoutMm.pageWidthMm;
+    const targetHmm = layoutMm.pageHeightMm;
+    // Use target page aspect ratio (same as export page) in preview container.
+    const pageScale = Math.min(PREVIEW_WIDTH / targetWmm, PREVIEW_HEIGHT / targetHmm);
+    const frameWidthCss = Math.max(1, targetWmm * pageScale);
+    const frameHeightCss = Math.max(1, targetHmm * pageScale);
+    const frameLeftCss = (PREVIEW_WIDTH - frameWidthCss) / 2;
+    const frameTopCss = (PREVIEW_HEIGHT - frameHeightCss) / 2;
+    setResultPreviewFrame({
+      top: frameTopCss,
+      left: frameLeftCss,
+      width: frameWidthCss,
+      height: frameHeightCss,
+    });
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const previewBytes = await renderPngBytes(
+          file,
+          {
+            ...focusedAdjuster,
+            width: Math.max(1, Number(focusedAdjuster.width)),
+            height: Math.max(1, Number(focusedAdjuster.height)),
+          },
+          currentPage,
+          trim
+        );
+        if (cancelled || !resultPreviewCanvasRef.current) return;
+        const blob = new Blob([previewBytes], { type: 'image/png' });
+        const bitmap = await createImageBitmap(blob);
+        if (cancelled || !resultPreviewCanvasRef.current) {
+          bitmap.close();
+          return;
+        }
+        const out = resultPreviewCanvasRef.current;
+        out.width = Math.max(1, Math.round(frameWidthCss));
+        out.height = Math.max(1, Math.round(frameHeightCss));
+        const ctx = out.getContext('2d');
+        if (!ctx) {
+          bitmap.close();
+          return;
+        }
+        ctx.clearRect(0, 0, out.width, out.height);
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, out.width, out.height);
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(bitmap, 0, 0, out.width, out.height);
+        bitmap.close();
+      } catch (err) {
+        if (!cancelled) {
+          console.error('Failed to render result preview simulation', err);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [file, sourceKind, adjusters, focusedAdjusterId, renderedPdfCssSize, currentPage, trim, pdfSize, pdfRenderScale]);
 
   // Redraw PDF preview on theme change
   useEffect(() => {
-    if (!file) return;
+    if (!file || sourceKind !== 'pdf') return;
     const mql = window.matchMedia('(prefers-color-scheme: dark)');
     const handler = () => {
       renderPDFPreview(file, currentPage);
@@ -367,25 +755,52 @@ function PDFDropZone() {
     return () => {
       mql.removeEventListener('change', handler);
     };
-  }, [file, currentPage]);
-
-  // Keyboard navigation for multipage
-  useEffect(() => {
-    if (!file || totalPages <= 1) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'ArrowLeft' && currentPage > 0) {
-        setCurrentPage(p => Math.max(0, p - 1));
-      } else if (e.key === 'ArrowRight' && currentPage < totalPages - 1) {
-        setCurrentPage(p => Math.min(totalPages - 1, p + 1));
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [file, currentPage, totalPages]);
+  }, [file, currentPage, sourceKind]);
 
   // Calculate trimmed size for aspect ratio (avoid redeclaration)
-  const trimmedForAspect = trim > 0 && pdfSize ? getTrimmedSize(pdfSize, trim) : pdfSize;
-  const aspectRatio = trimmedForAspect ? trimmedForAspect.width / trimmedForAspect.height : 1;
+  const trimmedForAspect = sourceKind === 'pdf' && trim > 0 && pdfSize ? getTrimmedSize(pdfSize, trim) : pdfSize;
+  const sourceAspectFromPdf = trimmedForAspect ? trimmedForAspect.width / trimmedForAspect.height : null;
+  const sourceAspectFromImage = imageSizePx && imageSizePx.height > 0 ? imageSizePx.width / imageSizePx.height : null;
+  const aspectRatio = sourceAspectFromPdf || sourceAspectFromImage || 1;
+  const getPdfAdjusters = (adjs: Adjuster[]) => adjs.filter(adj => adj.kind === 'pdf');
+  const getFirstPdfAdjusterIndex = (adjs: Adjuster[]) => adjs.findIndex(adj => adj.kind === 'pdf');
+
+  const makeDefaultPngAdjuster = (): Adjuster => {
+    const sourceWidthMm = sourceKind === 'pdf'
+      ? pdfSize?.width
+      : (imageSizePx ? (imageSizePx.width / 300) * 25.4 : undefined);
+    const sourceHeightMm = sourceKind === 'pdf'
+      ? pdfSize?.height
+      : (imageSizePx ? (imageSizePx.height / 300) * 25.4 : undefined);
+    const ratio = sourceWidthMm && sourceHeightMm && sourceHeightMm > 0
+      ? sourceWidthMm / sourceHeightMm
+      : (Number.isFinite(aspectRatio) && aspectRatio > 0 ? aspectRatio : 1);
+    let widthPx = 2500;
+    let heightPx = 2500;
+    if (ratio >= 1) {
+      widthPx = Math.round(2500 * ratio);
+      heightPx = 2500;
+    } else {
+      widthPx = 2500;
+      heightPx = Math.round(2500 / ratio);
+    }
+    const sourceSmallSideMm = sourceWidthMm && sourceHeightMm ? Math.min(sourceWidthMm, sourceHeightMm) : null;
+    const defaultPpi = sourceSmallSideMm
+      ? Math.max(1, Number((2500 / (sourceSmallSideMm / 25.4)).toFixed(2)))
+      : 300;
+    return {
+      id: crypto.randomUUID(),
+      kind: 'png',
+      mode: 'fill',
+      width: widthPx,
+      height: heightPx,
+      ppi: defaultPpi,
+      pngSourceWidthMm: sourceWidthMm || undefined,
+      pngSourceHeightMm: sourceHeightMm || undefined,
+      pngLockField: 'ppi',
+      source: 'png',
+    };
+  };
 
   // Drag and drop handlers
   const onDragOver = (e: React.DragEvent) => {
@@ -400,9 +815,26 @@ function PDFDropZone() {
     e.preventDefault();
     e.stopPropagation();
     setDragActive(false);
+    if (isTauri) return;
     handleFiles(e.dataTransfer.files);
   };
-  const onClick = () => {
+  const onClick = async () => {
+    if (isTauri) {
+      try {
+        const selected = await open({
+          multiple: false,
+          title: 'Select PDF or image',
+          filters: [
+            { name: 'PDF, AI and Images', extensions: ['pdf', 'ai', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tif', 'tiff', 'avif', 'heic', 'heif'] },
+          ],
+        });
+        if (!selected || typeof selected !== 'string') return;
+        await importFileByPath(selected);
+        return;
+      } catch (err) {
+        console.error('Tauri file import failed, falling back to input picker.', err);
+      }
+    }
     inputRef.current?.click();
   };
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -410,47 +842,192 @@ function PDFDropZone() {
   };
 
   useEffect(() => {
-    if (pdfSize && file) {
+    const hasSourceSize =
+      (sourceKind === 'pdf' && pdfSize) ||
+      (sourceKind === 'image' && imageSizePx);
+    if (hasSourceSize && file) {
       setAdjusters(adjs => {
-        if (adjs.length === 1 && (adjs[0].source === 'pdf' || adjs[0].source === 'trimmed')) {
-          return [{
-            ...adjs[0],
-            width: Number(pdfSize.width.toFixed(2)),
-            height: Number(pdfSize.height.toFixed(2)),
-            source: 'pdf',
-          }];
+        const effectivePdfWidth = sourceKind === 'pdf'
+          ? Math.max((pdfSize as { width: number; height: number }).width - 2 * trim, 1)
+          : 0;
+        const effectivePdfHeight = sourceKind === 'pdf'
+          ? Math.max((pdfSize as { width: number; height: number }).height - 2 * trim, 1)
+          : 0;
+        const sourceWidthMm = sourceKind === 'pdf'
+          ? Number(effectivePdfWidth.toFixed(2))
+          : Number((((imageSizePx as { width: number; height: number }).width / 300) * 25.4).toFixed(2));
+        const sourceHeightMm = sourceKind === 'pdf'
+          ? Number(effectivePdfHeight.toFixed(2))
+          : Number((((imageSizePx as { width: number; height: number }).height / 300) * 25.4).toFixed(2));
+        let changed = false;
+        let next = adjs;
+
+        if (sourceKind === 'pdf') {
+          const pdfIndices = adjs
+            .map((adj, idx) => ({ adj, idx }))
+            .filter(({ adj }) => adj.kind === 'pdf')
+            .map(({ idx }) => idx);
+
+          if (pdfIndices.length === 1) {
+            const idx = pdfIndices[0];
+            if (adjs[idx].source === 'pdf' || adjs[idx].source === 'trimmed') {
+              next = next.map((adj, i) => (
+                i === idx
+                  ? {
+                      ...adj,
+                      width: sourceWidthMm,
+                      height: sourceHeightMm,
+                      source: trim > 0 ? 'trimmed' : 'pdf',
+                    }
+                  : adj
+              ));
+              changed = true;
+            }
+          }
         }
-        return adjs;
+
+        next = next.map(adj => {
+          if (adj.kind !== 'pdf') return adj;
+          const normalizedMode = adj.mode === 'fit' ? 'scale' : (adj.mode || 'fill');
+          const normalizedMargin = Math.max(0, Number(adj.marginMm ?? 0));
+          const normalizedPaddingMode = adj.paddingMode === 'outside' ? 'outside' : 'inside';
+          const normalizedScale = Math.max(0.01, Number(adj.scaleFactor ?? sessionScaleFactor ?? 1));
+          const shouldApplyScale = sourceKind === 'pdf' && normalizedMode === 'scale';
+          const scaledWidth = shouldApplyScale ? Number((sourceWidthMm * normalizedScale).toFixed(2)) : adj.width;
+          const scaledHeight = shouldApplyScale ? Number((sourceHeightMm * normalizedScale).toFixed(2)) : adj.height;
+          const hasDiff =
+            adj.mode !== normalizedMode ||
+            Number(adj.marginMm ?? 0) !== normalizedMargin ||
+            (adj.paddingMode === 'outside' ? 'outside' : 'inside') !== normalizedPaddingMode ||
+            Number(adj.scaleFactor ?? 0) !== normalizedScale ||
+            adj.width !== scaledWidth ||
+            adj.height !== scaledHeight;
+          if (hasDiff) changed = true;
+          return hasDiff
+            ? {
+                ...adj,
+                mode: normalizedMode,
+                marginMm: normalizedMargin,
+                paddingMode: normalizedPaddingMode,
+                scaleFactor: normalizedScale,
+                width: scaledWidth,
+                height: scaledHeight,
+              }
+            : adj;
+        });
+
+        next = next.map(adj => {
+          if (adj.kind !== 'png') return adj;
+          const lockField = (adj.pngLockField === 'width' || adj.pngLockField === 'height' || adj.pngLockField === 'ppi')
+            ? adj.pngLockField
+            : 'ppi';
+          const sourceWidthIn = Math.max(1e-6, sourceWidthMm / 25.4);
+          const sourceHeightIn = Math.max(1e-6, sourceHeightMm / 25.4);
+          let nextPpi = Math.max(1, Number(adj.ppi ?? 300));
+          let widthPx = Math.max(1, Math.round(sourceWidthIn * nextPpi));
+          let heightPx = Math.max(1, Math.round(sourceHeightIn * nextPpi));
+
+          if (lockField === 'width') {
+            widthPx = Math.max(1, Math.round(Number(adj.width) || 1));
+            nextPpi = Math.max(1, Number((widthPx / sourceWidthIn).toFixed(2)));
+            heightPx = Math.max(1, Math.round(sourceHeightIn * nextPpi));
+          } else if (lockField === 'height') {
+            heightPx = Math.max(1, Math.round(Number(adj.height) || 1));
+            nextPpi = Math.max(1, Number((heightPx / sourceHeightIn).toFixed(2)));
+            widthPx = Math.max(1, Math.round(sourceWidthIn * nextPpi));
+          } else {
+            nextPpi = Math.max(1, Number((Number(adj.ppi ?? 300)).toFixed(2)));
+            widthPx = Math.max(1, Math.round(sourceWidthIn * nextPpi));
+            heightPx = Math.max(1, Math.round(sourceHeightIn * nextPpi));
+          }
+
+          const hasDiff =
+            adj.width !== widthPx ||
+            adj.height !== heightPx ||
+            Number(adj.ppi ?? 0) !== nextPpi ||
+            (adj.pngLockField || 'ppi') !== lockField ||
+            Number(adj.pngSourceWidthMm ?? 0) !== sourceWidthMm ||
+            Number(adj.pngSourceHeightMm ?? 0) !== sourceHeightMm;
+          if (hasDiff) changed = true;
+          return hasDiff
+            ? {
+                ...adj,
+                width: widthPx,
+                height: heightPx,
+                ppi: nextPpi,
+                pngLockField: lockField,
+                pngSourceWidthMm: sourceWidthMm,
+                pngSourceHeightMm: sourceHeightMm,
+              }
+            : adj;
+        });
+
+        return changed ? next : adjs;
       });
     }
-  }, [pdfSize, file]);
+  }, [sourceKind, pdfSize, imageSizePx, trim, file]);
 
   // Add handlers above the return statement
   const handleSetToPdfDimensions = () => {
     if (!pdfSize) return;
-    setAdjusters(adjs => [
-      {
-        ...adjs[0],
-        width: Number(pdfSize.width.toFixed(2)),
-        height: Number(pdfSize.height.toFixed(2)),
-        source: 'pdf',
-      },
-      ...adjs.slice(1)
-    ]);
+    setAdjusters(adjs => {
+      const idx = getFirstPdfAdjusterIndex(adjs);
+      if (idx < 0) return adjs;
+      return adjs.map((adj, i) => (
+        i === idx
+          ? {
+              ...adj,
+              width: Number(pdfSize.width.toFixed(2)),
+              height: Number(pdfSize.height.toFixed(2)),
+              ...(adj.mode === 'scale' ? { scaleFactor: 1 } : {}),
+              source: 'pdf',
+            }
+          : adj
+      ));
+    });
   };
   const handleSetToTrimmedDimensions = () => {
     if (!pdfSize) return;
     const trimmedWidth = Math.max(pdfSize.width - 2 * trim, 1);
     const trimmedHeight = Math.max(pdfSize.height - 2 * trim, 1);
-    setAdjusters(adjs => [
-      {
-        ...adjs[0],
-        width: Number(trimmedWidth.toFixed(2)),
-        height: Number(trimmedHeight.toFixed(2)),
-        source: 'trimmed',
-      },
-      ...adjs.slice(1)
-    ]);
+    setAdjusters(adjs => {
+      const idx = getFirstPdfAdjusterIndex(adjs);
+      if (idx < 0) return adjs;
+      return adjs.map((adj, i) => (
+        i === idx
+          ? {
+              ...adj,
+              width: Number(trimmedWidth.toFixed(2)),
+              height: Number(trimmedHeight.toFixed(2)),
+              source: 'manual',
+            }
+          : adj
+      ));
+    });
+  };
+
+  const applyTrimLive = (rawTrim: number) => {
+    const nextTrim = Number.isFinite(rawTrim) ? Math.max(rawTrim, 0) : 0;
+    setTrim(nextTrim);
+    const firstPdfAdjuster = adjusters.find(adj => adj.kind === 'pdf');
+    if (pdfSize && firstPdfAdjuster && (firstPdfAdjuster.source === 'pdf' || firstPdfAdjuster.source === 'trimmed')) {
+      const trimmedWidth = Math.max(pdfSize.width - 2 * nextTrim, 1);
+      const trimmedHeight = Math.max(pdfSize.height - 2 * nextTrim, 1);
+      setAdjusters(adjs => {
+        const idx = getFirstPdfAdjusterIndex(adjs);
+        if (idx < 0) return adjs;
+        return adjs.map((adj, i) => (
+          i === idx
+            ? {
+                ...adj,
+                width: Number(trimmedWidth.toFixed(2)),
+                height: Number(trimmedHeight.toFixed(2)),
+                source: nextTrim > 0 ? 'trimmed' : 'pdf',
+              }
+            : adj
+        ));
+      });
+    }
   };
 
   // Global drag and drop prevention
@@ -467,18 +1044,41 @@ function PDFDropZone() {
     };
   }, []);
 
-  // Update adjusters when aspect ratio changes (e.g., when trim changes)
+  // Keep fit/scale outputs in sync with source size changes (e.g., trim changes).
   useEffect(() => {
+    if (sourceKind !== 'pdf' || !pdfSize) return;
+    const sourceWidth = Math.max(pdfSize.width - 2 * trim, 1);
+    const sourceHeight = Math.max(pdfSize.height - 2 * trim, 1);
     setAdjusters(adjs => adjs.map(adj => {
-      if (adj.mode === 'fitHeight' && aspectRatio) {
-        return { ...adj, height: Number((adj.width / aspectRatio).toFixed(2)) };
+      if (adj.kind === 'png') return adj;
+      if (adj.mode === 'scale') {
+        const nextScale = Math.max(0.01, Number(adj.scaleFactor ?? sessionScaleFactor ?? 1));
+        return {
+          ...adj,
+          scaleFactor: nextScale,
+          width: Number((sourceWidth * nextScale).toFixed(2)),
+          height: Number((sourceHeight * nextScale).toFixed(2)),
+        };
       }
-      if (adj.mode === 'fitWidth' && aspectRatio) {
-        return { ...adj, width: Number((adj.height * aspectRatio).toFixed(2)) };
+      if (adj.mode === 'fitHeight' && sourceWidth > 0) {
+        const lockedWidth = Math.max(1, Number(adj.width));
+        return {
+          ...adj,
+          width: lockedWidth,
+          height: Number((lockedWidth * (sourceHeight / sourceWidth)).toFixed(2)),
+        };
+      }
+      if (adj.mode === 'fitWidth' && sourceHeight > 0) {
+        const lockedHeight = Math.max(1, Number(adj.height));
+        return {
+          ...adj,
+          height: lockedHeight,
+          width: Number((lockedHeight * (sourceWidth / sourceHeight)).toFixed(2)),
+        };
       }
       return adj;
     }));
-  }, [aspectRatio]);
+  }, [sourceKind, pdfSize, trim, sessionScaleFactor]);
 
   // When a new file is loaded, set the filename and original filename
   useEffect(() => {
@@ -491,6 +1091,7 @@ function PDFDropZone() {
     } else {
       setFileName('');
       setOriginalFileName('');
+      setOriginalImportedName('');
     }
   }, [file]);
 
@@ -570,120 +1171,465 @@ function PDFDropZone() {
   const isFileSystemAccessSupported = typeof window !== 'undefined' && 'showDirectoryPicker' in window;
   const isExportDirSupported = isTauri || isFileSystemAccessSupported;
 
+  useEffect(() => {
+    if (!isTauri) return;
+    let unlisten: (() => void) | null = null;
+    let unlistenFileDrop: (() => void) | null = null;
+    let unlistenFileDropHover: (() => void) | null = null;
+    let unlistenFileDropCancelled: (() => void) | null = null;
+    (async () => {
+      try {
+        const pendingPaths = await invoke<string[]>('take_pending_open_paths');
+        for (const absPath of pendingPaths || []) {
+          try {
+            await importFileByPath(absPath);
+          } catch (e) {
+            console.error('Failed to import pending path', absPath, e);
+          }
+        }
+      } catch (e) {
+        console.error('Failed to fetch pending open paths', e);
+      }
+      try {
+        unlisten = await listen<string[]>('external-files-opened', async (event) => {
+          const paths = Array.isArray(event.payload) ? event.payload : [];
+          for (const absPath of paths) {
+            try {
+              await importFileByPath(absPath);
+            } catch (e) {
+              console.error('Failed to import opened path', absPath, e);
+            }
+          }
+        });
+      } catch (e) {
+        console.error('Failed to subscribe to external-files-opened', e);
+      }
+      try {
+        unlistenFileDrop = await listen<string[]>('tauri://file-drop', async (event) => {
+          setDragActive(false);
+          const paths = Array.isArray(event.payload) ? event.payload : [];
+          if (paths.length === 0) return;
+          const firstPath = String(paths[0]);
+          try {
+            await importFileByPath(firstPath);
+          } catch (e) {
+            console.error('Failed to import dropped path', firstPath, e);
+          }
+        });
+      } catch (e) {
+        console.error('Failed to subscribe to tauri://file-drop', e);
+      }
+      try {
+        unlistenFileDropHover = await listen('tauri://file-drop-hover', () => {
+          setDragActive(true);
+        });
+      } catch (e) {
+        console.error('Failed to subscribe to tauri://file-drop-hover', e);
+      }
+      try {
+        unlistenFileDropCancelled = await listen('tauri://file-drop-cancelled', () => {
+          setDragActive(false);
+        });
+      } catch (e) {
+        console.error('Failed to subscribe to tauri://file-drop-cancelled', e);
+      }
+    })();
+    return () => {
+      if (unlisten) unlisten();
+      if (unlistenFileDrop) unlistenFileDrop();
+      if (unlistenFileDropHover) unlistenFileDropHover();
+      if (unlistenFileDropCancelled) unlistenFileDropCancelled();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isTauri]);
+
   const [exportDirHandle, setExportDirHandle] = useState<any>(null);
 
-  // Helper function to perform the actual PDF saving
-  const performSave = async (folder: string, adjustersToSave: Adjuster[], pagesToProcess: number[], fileToSave: File, baseFileName: string, currentTrim: number, currentPageNum: number, pageSelectionType: 'single' | 'all', dirHandle?: any) => {
-    let arrayBuffer = await fileToSave.arrayBuffer();
+  const buildExportTasks = (adjs: Adjuster[], pagesToProcess: number[], baseFileName: string): ExportTask[] => {
+    const tasks: ExportTask[] = [];
+    const safeBase = baseFileName.trim() ? baseFileName.trim() : 'output';
+    for (const adj of adjs) {
+      const processedFileName = replaceFilenameTokens(safeBase, adj.width, adj.height, adj.kind);
+      if (adj.kind === 'pdf') {
+        tasks.push({
+          id: crypto.randomUUID(),
+          kind: 'pdf',
+          adjuster: adj,
+          pages: pagesToProcess,
+          outputBaseName: processedFileName,
+          extension: 'pdf',
+        });
+      } else {
+        for (const pageIdx of pagesToProcess) {
+          tasks.push({
+            id: crypto.randomUUID(),
+            kind: 'png',
+            adjuster: adj,
+            pages: [pageIdx],
+            pageIdx,
+            outputBaseName: pagesToProcess.length > 1 ? `${processedFileName}_p${pageIdx + 1}` : processedFileName,
+            extension: 'png',
+          });
+        }
+      }
+    }
+    return tasks;
+  };
 
-    // Pre-process: flatten via Ghostscript if enabled (Tauri only)
-    if (flatten && isTauri) {
+  const writeExportFile = async (folder: string, fileNameWithExt: string, bytes: Uint8Array, mimeType: string, dirHandle?: any) => {
+    if (isTauri) {
+      const savePath = folder.replace(/\/+$/, '') + '/' + fileNameWithExt;
+      await writeBinaryFile({ path: savePath, contents: bytes });
+      return;
+    }
+    if (dirHandle) {
+      let targetHandle = dirHandle;
+      if (useSubfolder && subfolderName.trim()) {
+        targetHandle = await dirHandle.getDirectoryHandle(subfolderName.trim(), { create: true });
+      }
+      const fileHandle = await targetHandle.getFileHandle(fileNameWithExt, { create: true });
+      const writable = await fileHandle.createWritable();
+      await writable.write(bytes);
+      await writable.close();
+      return;
+    }
+    const blob = new Blob([bytes], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileNameWithExt;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 5000);
+  };
+
+  const renderPngBytes = async (fileToSave: File, adj: Adjuster, pageIdx: number, currentTrim: number) => {
+    if (sourceKind === 'image') {
+      let bitmap: ImageBitmap | null = null;
       try {
-        const flattenedBytes: number[] = await invoke('flatten_pdf', {
-          pdfBytes: Array.from(new Uint8Array(arrayBuffer))
-        });
-        arrayBuffer = new Uint8Array(flattenedBytes).buffer;
-      } catch (e: any) {
-        throw new Error(`Flatten failed: ${e}`);
+        bitmap = await createImageBitmap(fileToSave);
+      } catch {
+        const objectUrl = URL.createObjectURL(fileToSave);
+        try {
+          const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+            const node = new Image();
+            node.onload = () => resolve(node);
+            node.onerror = () => reject(new Error('Failed to decode image for export.'));
+            node.src = objectUrl;
+          });
+          bitmap = await createImageBitmap(img);
+        } finally {
+          URL.revokeObjectURL(objectUrl);
+        }
+      }
+      if (!bitmap) throw new Error('Failed to decode image for export.');
+
+      const srcWidth = bitmap.width;
+      const srcHeight = bitmap.height;
+      const layoutMm = getPaddingLayoutMm(adj);
+      const targetWidth = Math.max(1, Math.round(layoutMm.pageWidthMm));
+      const targetHeight = Math.max(1, Math.round(layoutMm.pageHeightMm));
+      const contentOffsetPx = Math.max(0, Math.round(layoutMm.contentOffsetMm));
+      const usableTargetWidth = Math.max(1, Math.round(layoutMm.contentWidthMm));
+      const usableTargetHeight = Math.max(1, Math.round(layoutMm.contentHeightMm));
+      const outputCanvas = document.createElement('canvas');
+      outputCanvas.width = targetWidth;
+      outputCanvas.height = targetHeight;
+      const outCtx = outputCanvas.getContext('2d');
+      if (!outCtx) throw new Error('Failed to create PNG output context.');
+      outCtx.fillStyle = '#fff';
+      outCtx.fillRect(0, 0, targetWidth, targetHeight);
+      outCtx.imageSmoothingEnabled = true;
+      outCtx.imageSmoothingQuality = 'high';
+
+      if (adj.mode === 'fill') {
+        const scale = Math.max(usableTargetWidth / srcWidth, usableTargetHeight / srcHeight);
+        const drawW = srcWidth * scale;
+        const drawH = srcHeight * scale;
+        const offsetX = contentOffsetPx + (usableTargetWidth - drawW) / 2;
+        const offsetY = contentOffsetPx + (usableTargetHeight - drawH) / 2;
+        outCtx.drawImage(bitmap, offsetX, offsetY, drawW, drawH);
+      } else if (adj.mode === 'scale') {
+        const scale = Math.min(usableTargetWidth / srcWidth, usableTargetHeight / srcHeight);
+        const drawW = srcWidth * scale;
+        const drawH = srcHeight * scale;
+        const offsetX = contentOffsetPx + (usableTargetWidth - drawW) / 2;
+        const offsetY = contentOffsetPx + (usableTargetHeight - drawH) / 2;
+        outCtx.drawImage(bitmap, offsetX, offsetY, drawW, drawH);
+      } else {
+        outCtx.drawImage(bitmap, contentOffsetPx, contentOffsetPx, usableTargetWidth, usableTargetHeight);
+      }
+      if (layoutMm.maskPaddingMm > 0) {
+        applyCanvasPaddingMask(outCtx, targetWidth, targetHeight, Math.round(layoutMm.maskPaddingMm), Math.round(layoutMm.maskPaddingMm));
+      }
+      bitmap.close();
+      const blob = await new Promise<Blob | null>(resolve => outputCanvas.toBlob(resolve, 'image/png'));
+      if (!blob) throw new Error('Failed to encode PNG image.');
+      const pngBuffer = await blob.arrayBuffer();
+      return new Uint8Array(pngBuffer);
+    }
+
+    let pdf = pdfDocRef.current;
+    if (!pdf) {
+      const arrayBuffer = await fileToSave.arrayBuffer();
+      pdf = await getDocument({ data: arrayBuffer }).promise;
+      pdfDocRef.current = pdf;
+    }
+    const page = await pdf.getPage(pageIdx + 1);
+    const viewport = page.getViewport({ scale: 1, rotation: page.rotate });
+    const POINTS_PER_MM = 1 / MM_PER_POINT;
+    const trimPoints = currentTrim > 0 ? currentTrim * POINTS_PER_MM : 0;
+
+    const cropX = trimPoints;
+    const cropY = trimPoints;
+    const cropWidth = Math.max(viewport.width - 2 * trimPoints, 1);
+    const cropHeight = Math.max(viewport.height - 2 * trimPoints, 1);
+
+    const layoutMm = getPaddingLayoutMm(adj);
+    const targetWidth = Math.max(1, Math.round(layoutMm.pageWidthMm));
+    const targetHeight = Math.max(1, Math.round(layoutMm.pageHeightMm));
+    const contentOffsetPx = Math.max(0, Math.round(layoutMm.contentOffsetMm));
+    const usableTargetWidth = Math.max(1, Math.round(layoutMm.contentWidthMm));
+    const usableTargetHeight = Math.max(1, Math.round(layoutMm.contentHeightMm));
+    const fillScale = Math.max(usableTargetWidth / cropWidth, usableTargetHeight / cropHeight);
+    const fitScale = Math.min(usableTargetWidth / cropWidth, usableTargetHeight / cropHeight);
+    const renderScale = adj.mode === 'scale' ? fitScale : fillScale;
+
+    const renderViewport = page.getViewport({ scale: renderScale, rotation: page.rotate });
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = Math.max(1, Math.ceil(renderViewport.width));
+    tempCanvas.height = Math.max(1, Math.ceil(renderViewport.height));
+    const tempCtx = tempCanvas.getContext('2d');
+    if (!tempCtx) throw new Error('Failed to create PNG render context.');
+
+    await page.render({
+      canvasContext: tempCtx,
+      viewport: renderViewport,
+      backgroundColor: 'rgba(255,255,255,1)',
+    }).promise;
+
+    const srcX = cropX * renderScale;
+    const srcY = tempCanvas.height - (cropY + cropHeight) * renderScale;
+    const srcW = cropWidth * renderScale;
+    const srcH = cropHeight * renderScale;
+
+    const outputCanvas = document.createElement('canvas');
+    outputCanvas.width = targetWidth;
+    outputCanvas.height = targetHeight;
+    const outCtx = outputCanvas.getContext('2d');
+    if (!outCtx) throw new Error('Failed to create PNG output context.');
+
+    outCtx.clearRect(0, 0, targetWidth, targetHeight);
+    outCtx.fillStyle = '#fff';
+    outCtx.fillRect(0, 0, targetWidth, targetHeight);
+    outCtx.imageSmoothingEnabled = true;
+    outCtx.imageSmoothingQuality = 'high';
+
+    if (adj.mode === 'fill') {
+      const drawW = srcW;
+      const drawH = srcH;
+      const offsetX = contentOffsetPx + (usableTargetWidth - drawW) / 2;
+      const offsetY = contentOffsetPx + (usableTargetHeight - drawH) / 2;
+      outCtx.drawImage(tempCanvas, srcX, srcY, srcW, srcH, offsetX, offsetY, drawW, drawH);
+    } else if (adj.mode === 'scale') {
+      const drawW = srcW;
+      const drawH = srcH;
+      const offsetX = contentOffsetPx + (usableTargetWidth - drawW) / 2;
+      const offsetY = contentOffsetPx + (usableTargetHeight - drawH) / 2;
+      outCtx.drawImage(tempCanvas, srcX, srcY, srcW, srcH, offsetX, offsetY, drawW, drawH);
+    } else {
+      outCtx.drawImage(tempCanvas, srcX, srcY, srcW, srcH, contentOffsetPx, contentOffsetPx, usableTargetWidth, usableTargetHeight);
+    }
+    if (layoutMm.maskPaddingMm > 0) {
+      applyCanvasPaddingMask(outCtx, targetWidth, targetHeight, Math.round(layoutMm.maskPaddingMm), Math.round(layoutMm.maskPaddingMm));
+    }
+
+    const blob = await new Promise<Blob | null>(resolve => outputCanvas.toBlob(resolve, 'image/png'));
+    if (!blob) throw new Error('Failed to encode PNG image.');
+    const pngBuffer = await blob.arrayBuffer();
+    return new Uint8Array(pngBuffer);
+  };
+
+  const runExportTasks = async (folder: string, tasks: ExportTask[], fileToSave: File, currentTrim: number, dirHandle?: any) => {
+    let processedPdfBuffer: ArrayBuffer | null = null;
+    const needsPdf = tasks.some(t => t.kind === 'pdf');
+    let imageSourcePngBytes: Uint8Array | null = null;
+    let imageSourceSize: { width: number; height: number } | null = null;
+    if (needsPdf) {
+      if (sourceKind === 'pdf') {
+        processedPdfBuffer = await fileToSave.arrayBuffer();
+        if (flatten && isTauri) {
+          try {
+            const flattenedBytes: number[] = await invoke('flatten_pdf', {
+              pdfBytes: Array.from(new Uint8Array(processedPdfBuffer)),
+            });
+            processedPdfBuffer = new Uint8Array(flattenedBytes).buffer;
+          } catch (e: any) {
+            throw new Error(`Flatten failed: ${e}`);
+          }
+        }
+      } else if (sourceKind === 'image') {
+        let bitmap: ImageBitmap | null = null;
+        try {
+          bitmap = await createImageBitmap(fileToSave);
+        } catch {
+          const objectUrl = URL.createObjectURL(fileToSave);
+          try {
+            const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+              const node = new Image();
+              node.onload = () => resolve(node);
+              node.onerror = () => reject(new Error('Failed to decode image for PDF export.'));
+              node.src = objectUrl;
+            });
+            bitmap = await createImageBitmap(img);
+          } finally {
+            URL.revokeObjectURL(objectUrl);
+          }
+        }
+        if (!bitmap) throw new Error('Failed to decode image for PDF export.');
+        imageSourceSize = { width: bitmap.width, height: bitmap.height };
+        const canvas = document.createElement('canvas');
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) throw new Error('Failed to prepare image for PDF export.');
+        ctx.drawImage(bitmap, 0, 0);
+        bitmap.close();
+        const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'));
+        if (!blob) throw new Error('Failed to encode image for PDF export.');
+        imageSourcePngBytes = new Uint8Array(await blob.arrayBuffer());
       }
     }
 
-    const pdfDoc = await PDFDocument.load(arrayBuffer);
-
-    for (const adj of adjustersToSave) {
-      const newPdf = await PDFDocument.create();
-      let pages: number[] = [];
-      if (pageSelectionType === 'all') {
-        pages = Array.from({ length: pdfDoc.getPageCount() }, (_, i) => i);
-      } else {
-        pages = [currentPageNum];
-      }
-
-      for (const pageIdx of pages) {
-        const srcPage = pdfDoc.getPage(pageIdx);
-        let { width: srcWidth, height: srcHeight } = srcPage.getSize();
-        let cropX = 0, cropY = 0, cropWidth = srcWidth, cropHeight = srcHeight;
-        if (currentTrim > 0) {
+    for (const task of tasks) {
+      const fileNameWithExt = `${task.outputBaseName}.${task.extension}`;
+      if (task.kind === 'pdf') {
+        const newPdf = await PDFDocument.create();
+        if (sourceKind === 'pdf') {
+          if (!processedPdfBuffer) throw new Error('PDF source buffer missing.');
+          const pdfDoc = await PDFDocument.load(processedPdfBuffer);
+          for (const pageIdx of task.pages) {
+            const srcPage = pdfDoc.getPage(pageIdx);
+            const { width: srcWidth, height: srcHeight } = srcPage.getSize();
+            let cropX = 0, cropY = 0, cropWidth = srcWidth, cropHeight = srcHeight;
+            if (currentTrim > 0) {
+              const POINTS_PER_MM = 1 / MM_PER_POINT;
+              const trimPoints = currentTrim * POINTS_PER_MM;
+              cropX = trimPoints;
+              cropY = trimPoints;
+              cropWidth = Math.max(srcWidth - 2 * trimPoints, 1);
+              cropHeight = Math.max(srcHeight - 2 * trimPoints, 1);
+            }
+            const POINTS_PER_MM = 1 / MM_PER_POINT;
+            const layoutMm = getPaddingLayoutMm(task.adjuster);
+            const targetWidth = layoutMm.pageWidthMm * POINTS_PER_MM;
+            const targetHeight = layoutMm.pageHeightMm * POINTS_PER_MM;
+            const contentOffsetPoints = layoutMm.contentOffsetMm * POINTS_PER_MM;
+            const usableTargetWidth = Math.max(layoutMm.contentWidthMm * POINTS_PER_MM, 1);
+            const usableTargetHeight = Math.max(layoutMm.contentHeightMm * POINTS_PER_MM, 1);
+            const [embeddedPage] = await newPdf.embedPages([srcPage], [
+              { left: cropX, bottom: cropY, right: cropX + cropWidth, top: cropY + cropHeight },
+            ]);
+            let scaleX = 1;
+            let scaleY = 1;
+            let offsetX = contentOffsetPoints;
+            let offsetY = contentOffsetPoints;
+            if (task.adjuster.mode === 'fill') {
+              const scale = Math.max(usableTargetWidth / cropWidth, usableTargetHeight / cropHeight);
+              scaleX = scale;
+              scaleY = scale;
+              offsetX = contentOffsetPoints + (usableTargetWidth - cropWidth * scale) / 2;
+              offsetY = contentOffsetPoints + (usableTargetHeight - cropHeight * scale) / 2;
+            } else if (task.adjuster.mode === 'scale') {
+              const scale = Math.min(usableTargetWidth / cropWidth, usableTargetHeight / cropHeight);
+              scaleX = scale;
+              scaleY = scale;
+              offsetX = contentOffsetPoints + (usableTargetWidth - cropWidth * scale) / 2;
+              offsetY = contentOffsetPoints + (usableTargetHeight - cropHeight * scale) / 2;
+            } else {
+              scaleX = usableTargetWidth / cropWidth;
+              scaleY = usableTargetHeight / cropHeight;
+            }
+            const newPage = newPdf.addPage([targetWidth, targetHeight]);
+            newPage.drawPage(embeddedPage, { x: offsetX, y: offsetY, xScale: scaleX, yScale: scaleY });
+            if (layoutMm.maskPaddingMm > 0) {
+              applyPdfPaddingMask(newPage, targetWidth, targetHeight, layoutMm.maskPaddingMm * POINTS_PER_MM);
+            }
+          }
+        } else if (sourceKind === 'image') {
+          if (!imageSourcePngBytes || !imageSourceSize) throw new Error('Image source buffer missing.');
           const POINTS_PER_MM = 1 / MM_PER_POINT;
-          const trimPoints = currentTrim * POINTS_PER_MM;
-          cropX = trimPoints;
-          cropY = trimPoints;
-          cropWidth = Math.max(srcWidth - 2 * trimPoints, 1);
-          cropHeight = Math.max(srcHeight - 2 * trimPoints, 1);
+          const layoutMm = getPaddingLayoutMm(task.adjuster);
+          const targetWidth = layoutMm.pageWidthMm * POINTS_PER_MM;
+          const targetHeight = layoutMm.pageHeightMm * POINTS_PER_MM;
+          const contentOffsetPoints = layoutMm.contentOffsetMm * POINTS_PER_MM;
+          const usableTargetWidth = Math.max(layoutMm.contentWidthMm * POINTS_PER_MM, 1);
+          const usableTargetHeight = Math.max(layoutMm.contentHeightMm * POINTS_PER_MM, 1);
+          const embeddedImage = await newPdf.embedPng(imageSourcePngBytes);
+          const srcWidth = imageSourceSize.width;
+          const srcHeight = imageSourceSize.height;
+          let drawWidth = usableTargetWidth;
+          let drawHeight = usableTargetHeight;
+          let offsetX = contentOffsetPoints;
+          let offsetY = contentOffsetPoints;
+          if (task.adjuster.mode === 'fill') {
+            const scale = Math.max(usableTargetWidth / srcWidth, usableTargetHeight / srcHeight);
+            drawWidth = srcWidth * scale;
+            drawHeight = srcHeight * scale;
+            offsetX = contentOffsetPoints + (usableTargetWidth - drawWidth) / 2;
+            offsetY = contentOffsetPoints + (usableTargetHeight - drawHeight) / 2;
+          } else if (task.adjuster.mode === 'scale') {
+            const scale = Math.min(usableTargetWidth / srcWidth, usableTargetHeight / srcHeight);
+            drawWidth = srcWidth * scale;
+            drawHeight = srcHeight * scale;
+            offsetX = contentOffsetPoints + (usableTargetWidth - drawWidth) / 2;
+            offsetY = contentOffsetPoints + (usableTargetHeight - drawHeight) / 2;
+          }
+          const newPage = newPdf.addPage([targetWidth, targetHeight]);
+          newPage.drawImage(embeddedImage, {
+            x: offsetX,
+            y: offsetY,
+            width: drawWidth,
+            height: drawHeight,
+          });
+          if (layoutMm.maskPaddingMm > 0) {
+            applyPdfPaddingMask(newPage, targetWidth, targetHeight, layoutMm.maskPaddingMm * POINTS_PER_MM);
+          }
+        } else {
+          throw new Error('Unsupported source type for PDF export.');
         }
-        let targetWidth = cropWidth, targetHeight = cropHeight;
-        if (adj) {
-          const POINTS_PER_MM = 1 / MM_PER_POINT;
-          targetWidth = adj.width * POINTS_PER_MM;
-          targetHeight = adj.height * POINTS_PER_MM;
-        }
-        const [embeddedPage] = await newPdf.embedPages([srcPage], [
-          {
-            left: cropX,
-            bottom: cropY,
-            right: cropX + cropWidth,
-            top: cropY + cropHeight,
-          },
-        ]);
-        let scaleX = 1, scaleY = 1;
-        let offsetX = 0, offsetY = 0;
-
-        if (adj.mode === 'fill') {
-          const scale = Math.max(targetWidth / cropWidth, targetHeight / cropHeight);
-          scaleX = scale;
-          scaleY = scale;
-          offsetX = (targetWidth - cropWidth * scale) / 2;
-          offsetY = (targetHeight - cropHeight * scale) / 2;
-        } else { // 'fitWidth' or 'fitHeight' (current stretching behavior)
-          scaleX = targetWidth / cropWidth;
-          scaleY = targetHeight / cropHeight;
-        }
-
-        const newPage = newPdf.addPage([targetWidth, targetHeight]);
-        newPage.drawPage(embeddedPage, {
-          x: offsetX,
-          y: offsetY,
-          xScale: scaleX,
-          yScale: scaleY,
-        });
-      }
-      const pdfBytes = await newPdf.save();
-      const processedFileName = replaceFilenameTokens(baseFileName.trim() ? baseFileName.trim() : 'output', adj.width, adj.height);
-      const savePath = folder.replace(/\/+$/, '') + '/' + processedFileName + '.pdf';
-
-      if (isTauri) {
-        await writeBinaryFile({ path: savePath, contents: pdfBytes });
-      } else if (dirHandle) {
-        // Save using File System Access API
-        let targetHandle = dirHandle;
-        if (useSubfolder && subfolderName.trim()) {
-          targetHandle = await dirHandle.getDirectoryHandle(subfolderName.trim(), { create: true });
-        }
-        const fileHandle = await targetHandle.getFileHandle(processedFileName + '.pdf', { create: true });
-        const writable = await fileHandle.createWritable();
-        await writable.write(pdfBytes);
-        await writable.close();
+        const pdfBytes = await newPdf.save();
+        await writeExportFile(folder, fileNameWithExt, pdfBytes, 'application/octet-stream', dirHandle);
       } else {
-        // Browser fallback: trigger download
-        // Use application/octet-stream to force download on iOS/mobile instead of opening preview
-        const blob = new Blob([pdfBytes], { type: 'application/octet-stream' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = processedFileName + '.pdf';
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(() => {
-          document.body.removeChild(a);
-          URL.revokeObjectURL(url);
-        }, 5000);
+        const pngBytes = await renderPngBytes(fileToSave, task.adjuster, task.pageIdx ?? task.pages[0], currentTrim);
+        await writeExportFile(folder, fileNameWithExt, pngBytes, 'image/png', dirHandle);
       }
     }
+  };
+
+  const resolvePagesToProcess = async (fileToSave: File): Promise<number[]> => {
+    if (sourceKind === 'image') return [0];
+    if (pageSelection === 'single') return [currentPage];
+    const known = pdfDocRef.current?.numPages;
+    if (known && known > 0) return Array.from({ length: known }, (_, i) => i);
+    const arrayBuffer = await fileToSave.arrayBuffer();
+    const pdf = await getDocument({ data: arrayBuffer }).promise;
+    pdfDocRef.current = pdf;
+    return Array.from({ length: pdf.numPages }, (_, i) => i);
   };
 
   // Tauri-based export handler
   const handleSave = async () => {
     if (!file) return;
+    if (adjusters.length === 0) {
+      setErrorMessage('No size adjusters found. Add at least one size adjuster to export.');
+      setSaveStatus('error');
+      setShowPopover(true);
+      return;
+    }
     setSaveStatus('saving');
     setErrorMessage(null);
     if (fadeTimeout.current) clearTimeout(fadeTimeout.current);
@@ -712,23 +1658,31 @@ function PDFDropZone() {
         }
       }
 
+      const pagesToProcess = await resolvePagesToProcess(file);
+      const tasks = buildExportTasks(adjusters, pagesToProcess, fileName);
+      if (tasks.length === 0) {
+        throw new Error('No export tasks could be created for this source file type.');
+      }
+      setPendingExportTasks(tasks);
+
       if (isTauri) {
         if (specifyExportLocation && useSubfolder && subfolderName.trim()) {
           folder = folder.replace(/\/+$/, '') + '/' + subfolderName.trim().replace(/\/+$/, '');
         }
 
         const filePathsToCheck: string[] = [];
-        const proposedFiles: Array<{ fileName: string; isConflict: boolean; shouldOverwrite: boolean; originalPath?: string }> = [];
+        const proposedFiles: Array<{ fileName: string; isConflict: boolean; shouldOverwrite: boolean; originalPath?: string; taskId?: string }> = [];
 
-        for (const adj of adjusters) {
-          const processedFileName = replaceFilenameTokens(fileName.trim() ? fileName.trim() : 'output', adj.width, adj.height);
-          const savePath = folder.replace(/\/+$/, '') + '/' + processedFileName + '.pdf';
+        for (const task of tasks) {
+          const fullName = `${task.outputBaseName}.${task.extension}`;
+          const savePath = folder.replace(/\/+$/, '') + '/' + fullName;
           filePathsToCheck.push(savePath);
           proposedFiles.push({
-            fileName: processedFileName + '.pdf',
+            fileName: fullName,
             isConflict: false,
             shouldOverwrite: true,
             originalPath: savePath,
+            taskId: task.id,
           });
         }
 
@@ -759,12 +1713,11 @@ function PDFDropZone() {
         }
 
         if (targetHandle) {
-          const proposedFiles: Array<{ fileName: string; isConflict: boolean; shouldOverwrite: boolean }> = [];
+          const proposedFiles: Array<{ fileName: string; isConflict: boolean; shouldOverwrite: boolean; taskId?: string }> = [];
           let hasConflicts = false;
 
-          for (const adj of adjusters) {
-            const processedFileName = replaceFilenameTokens(fileName.trim() ? fileName.trim() : 'output', adj.width, adj.height);
-            const finalName = processedFileName + '.pdf';
+          for (const task of tasks) {
+            const finalName = `${task.outputBaseName}.${task.extension}`;
             let isConflict = false;
             try {
               await targetHandle.getFileHandle(finalName, { create: false });
@@ -776,7 +1729,8 @@ function PDFDropZone() {
             proposedFiles.push({
               fileName: finalName,
               isConflict,
-              shouldOverwrite: true
+              shouldOverwrite: true,
+              taskId: task.id,
             });
           }
 
@@ -790,13 +1744,10 @@ function PDFDropZone() {
       }
 
       // If no conflicts or in browser, proceed with saving
-      const pagesToProcess: number[] = pageSelection === 'all'
-        ? Array.from({ length: pdfDocRef.current?.numPages || 1 }, (_, i) => i)
-        : [currentPage];
-
-      await performSave(folder, adjusters, pagesToProcess, file, fileName, trim, currentPage, pageSelection, dirHandle);
+      await runExportTasks(folder, tasks, file, trim, dirHandle);
       setSaveStatus('success');
       fadeTimeout.current = setTimeout(() => setSaveStatus('idle'), 5000);
+      setPendingExportTasks([]);
 
     } catch (err: any) {
       console.error('[Export] Error during export:', err);
@@ -813,20 +1764,21 @@ function PDFDropZone() {
     setErrorMessage(null);
 
     try {
-      const adjustersToSave = adjusters.filter((_, idx) => conflictFiles[idx].shouldOverwrite);
-      const pagesToProcess: number[] = pageSelection === 'all'
-        ? Array.from({ length: pdfDocRef.current?.numPages || 1 }, (_, i) => i)
-        : [currentPage];
+      const selectedTaskIds = new Set(
+        conflictFiles.filter(fileItem => fileItem.shouldOverwrite).map(fileItem => fileItem.taskId).filter(Boolean)
+      );
+      const tasksToSave = pendingExportTasks.filter(task => selectedTaskIds.has(task.id));
 
       let folder = exportFolder;
       if (specifyExportLocation && useSubfolder && subfolderName.trim()) {
         folder = folder.replace(/\/+$/, '') + '/' + subfolderName.trim().replace(/\/+$/, '');
       }
 
-      await performSave(folder, adjustersToSave, pagesToProcess, file, fileName, trim, currentPage, pageSelection, exportDirHandle);
+      await runExportTasks(folder, tasksToSave, file, trim, exportDirHandle);
       setSaveStatus('success');
       fadeTimeout.current = setTimeout(() => setSaveStatus('idle'), 5000);
       setConflictFiles([]); // Clear conflicts after saving
+      setPendingExportTasks([]);
     } catch (err: any) {
       setErrorMessage(err?.message || String(err));
       setSaveStatus('error');
@@ -839,7 +1791,49 @@ function PDFDropZone() {
     setSaveStatus('idle');
     setShowPopover(false);
     setConflictFiles([]); // Clear conflicts on cancel
+    setPendingExportTasks([]);
   };
+
+  const handleAddPdfAdjuster = () => {
+    setAdjusters(adjs => {
+      const pdfAdjusters = getPdfAdjusters(adjs);
+      const lastPdf = pdfAdjusters[pdfAdjusters.length - 1];
+      const fallbackWidth = pdfSize ? Number(pdfSize.width.toFixed(2)) : 210;
+      const fallbackHeight = pdfSize ? Number(pdfSize.height.toFixed(2)) : 297;
+      return [
+        ...adjs,
+        lastPdf
+          ? { ...lastPdf, id: crypto.randomUUID() }
+          : {
+              id: crypto.randomUUID(),
+              kind: 'pdf',
+              mode: 'fill',
+              width: fallbackWidth,
+              height: fallbackHeight,
+              marginMm: 0,
+              paddingMode: 'inside',
+              scaleFactor: sessionScaleFactor,
+              source: 'manual',
+            },
+      ];
+    });
+  };
+
+  const handleAddPngAdjuster = () => {
+    setAdjusters(adjs => [...adjs, makeDefaultPngAdjuster()]);
+  };
+
+  const activePdfAdjuster =
+    adjusters.find(adj => adj.id === focusedAdjusterId && adj.kind === 'pdf') ||
+    adjusters.find(adj => adj.kind === 'pdf') ||
+    null;
+  const showResultPaddingPreview =
+    sourceKind === 'pdf' &&
+    Boolean(renderedPdfCssSize) &&
+    Boolean(resultPreviewFrame) &&
+    Boolean(activePdfAdjuster) &&
+    Number(activePdfAdjuster?.width ?? 0) > 0 &&
+    Number(activePdfAdjuster?.height ?? 0) > 0;
 
   return (
     <div style={{
@@ -854,8 +1848,21 @@ function PDFDropZone() {
       paddingBottom: 32,
       background: 'var(--bg-color)',
     }}>
-      {/* Title: always show in Tauri */}
-      <h1 style={{ fontSize: 28, fontWeight: 700, marginBottom: 32, color: 'var(--text-color)', letterSpacing: 0.5 }}>PDF Resizer</h1>
+      {!isTauri && (
+        <h1 style={{ fontSize: 28, fontWeight: 700, marginBottom: 32, color: 'var(--text-color)', letterSpacing: 0.5 }}>PDF Resizer</h1>
+      )}
+      {unsupportedFormatMessage && (
+        <div style={{
+          background: '#000',
+          color: '#fff',
+          padding: '8px 14px',
+          borderRadius: 8,
+          fontSize: 14,
+          marginBottom: 12,
+        }}>
+          {unsupportedFormatMessage}
+        </div>
+      )}
       <div
         onDragOver={onDragOver}
         onDragLeave={onDragLeave}
@@ -882,7 +1889,7 @@ function PDFDropZone() {
         <input
           ref={inputRef}
           type="file"
-          accept="application/pdf"
+          accept=".pdf,.ai,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff,.avif,.heic,.heif,image/*"
           style={{ display: 'none' }}
           onChange={onFileChange}
         />
@@ -915,7 +1922,28 @@ function PDFDropZone() {
                 pointerEvents: 'none',
               }}
             />
-            {cropOverlay && renderedPdfCssSize && (
+            {showResultPaddingPreview && renderedPdfCssSize && resultPreviewFrame && (
+              <div style={{
+                position: 'absolute',
+                top: (PREVIEW_HEIGHT - renderedPdfCssSize.height) / 2 + resultPreviewFrame.top,
+                left: (PREVIEW_WIDTH - renderedPdfCssSize.width) / 2 + resultPreviewFrame.left,
+                width: resultPreviewFrame.width,
+                height: resultPreviewFrame.height,
+                pointerEvents: 'none',
+                overflow: 'hidden',
+              }}>
+                <canvas
+                  ref={resultPreviewCanvasRef}
+                  style={{
+                    display: 'block',
+                    width: '100%',
+                    height: '100%',
+                    background: '#fff',
+                  }}
+                />
+              </div>
+            )}
+            {sourceKind === 'pdf' && cropOverlay && renderedPdfCssSize && !showResultPaddingPreview && (
               <div style={{
                 position: 'absolute',
                 top: (PREVIEW_HEIGHT - renderedPdfCssSize.height) / 2,
@@ -932,7 +1960,7 @@ function PDFDropZone() {
               </div>
             )}
             {/* Pagination overlay */}
-            {totalPages > 1 && (
+            {sourceKind === 'pdf' && totalPages > 1 && (
               <div style={{
                 position: 'absolute',
                 left: 0,
@@ -1008,7 +2036,24 @@ function PDFDropZone() {
             )}
             <button
               type="button"
-              onClick={e => { e.stopPropagation(); setFile(null); setFileName(''); setFileSize(null); setPdfSize(null); setTrim(0); setCurrentPage(0); setTotalPages(1); pdfDocRef.current = null; }}
+              onClick={e => {
+                e.stopPropagation();
+                setFile(null);
+                setSourceKind(null);
+                setFileName('');
+                setOriginalFileName('');
+                setOriginalImportedName('');
+                setFileSize(null);
+                setPdfSize(null);
+                setImageSizePx(null);
+                setTrim(0);
+                setCurrentPage(0);
+                setTotalPages(1);
+                setCropOverlay(null);
+                setRenderedPdfCssSize(null);
+                setPdfRenderScale(null);
+                pdfDocRef.current = null;
+              }}
               style={{
                 position: 'absolute',
                 top: 8,
@@ -1029,7 +2074,7 @@ function PDFDropZone() {
                 lineHeight: 1,
                 textAlign: 'center',
               }}
-              aria-label="Close PDF preview"
+              aria-label="Close file preview"
             >
               <svg width="22" height="22" viewBox="0 0 20.2832 19.9316" style={{ display: 'block' }} xmlns="http://www.w3.org/2000/svg">
                 <g>
@@ -1040,13 +2085,15 @@ function PDFDropZone() {
             </button>
           </>
         ) : (
-          <span style={{ color: 'var(--secondary-color)', fontSize: 18, userSelect: 'none' }}>
-            Drop PDF here or click to select
+          <span style={{ color: 'var(--secondary-color)', fontSize: 18, userSelect: 'none', textAlign: 'center', lineHeight: 1.35 }}>
+            Drop .pdf, .ai or image here
+            <br />
+            or click to select
           </span>
         )}
       </div>
-      {/* Filename under preview: always show originalFileName if file is loaded */}
-      {file && originalFileName && (
+      {/* Filename under preview: always show imported name with extension if file is loaded */}
+      {file && originalImportedName && (
         <div style={{
           marginTop: 12,
           color: 'var(--text-color)',
@@ -1057,10 +2104,10 @@ function PDFDropZone() {
           wordBreak: 'break-all',
           alignSelf: 'center',
         }}>
-          {originalFileName}
+          {originalImportedName}
         </div>
       )}
-      {file && totalPages > 1 && (
+      {file && sourceKind === 'pdf' && totalPages > 1 && (
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', marginTop: 8, gap: 16 }}>
           <span style={{ color: 'var(--secondary-color)', fontSize: 14 }}>Process:</span>
           <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', fontSize: 14 }}>
@@ -1070,7 +2117,7 @@ function PDFDropZone() {
               onChange={() => setPageSelection('single')}
               style={{ marginRight: 4 }}
             />
-            Single Page
+            This page
           </label>
           <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', fontSize: 14 }}>
             <input
@@ -1079,11 +2126,11 @@ function PDFDropZone() {
               onChange={() => setPageSelection('all')}
               style={{ marginRight: 4 }}
             />
-            All Pages
+            All pages
           </label>
         </div>
       )}
-      {file && (
+      {file && sourceKind === 'pdf' && (
         <div style={{
           display: 'flex',
           flexDirection: 'column',
@@ -1092,25 +2139,51 @@ function PDFDropZone() {
           maxWidth: 'none',
           margin: '0 auto',
         }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', marginTop: 8, gap: 8, width: '100%' }}>
-            {/* Show PDF dimensions if available */}
-            <span style={{ color: 'var(--secondary-color)', fontSize: 14 }}>
-              {pdfSize ? formatSizePoints(pdfSize.width, pdfSize.height) : ''}
-            </span>
-            {/* Pinch button, only if trim is 0 */}
-            {trim === 0 && (
-              <button type="button" onClick={handleSetToPdfDimensions} style={{ background: 'none', border: 'none', padding: 0, margin: 0, cursor: 'pointer', color: 'var(--secondary-color)', display: 'flex', alignItems: 'center', marginRight: 0 }} title="Reset size adjuster to PDF dimensions">
-                <svg width="18" height="14" viewBox="0 0 22.3773 17.8571" style={{ display: 'block' }} xmlns="http://www.w3.org/2000/svg">
-                  <g>
-                    <rect height="17.8571" opacity="0" width="22.3773" x="0" y="0" />
-                    <path d="M2.46305 0.271327C1.35954 1.53109 0.509927 3.07406 0.0314117 4.68539C-0.212729 5.535 1.03727 5.97445 1.33024 4.99789C1.75016 3.59164 2.50211 2.26351 3.47868 1.15023C4.12321 0.417811 3.10758-0.451329 2.46305 0.271327ZM2.46305 14.2362C3.10758 14.9686 4.12321 14.0995 3.47868 13.3573C2.50211 12.2537 1.75016 10.9256 1.33024 9.51937C1.03727 8.53305-0.212729 8.9725 0.0314117 9.83187C0.509927 11.4432 1.35954 12.9862 2.46305 14.2362Z" fill="currentColor" fillOpacity="0.85" />
-                    <path d="M14.299 17.6248C17.922 17.6248 22.0138 15.3202 22.0138 10.3104C22.0138 7.89828 20.7443 2.60531 19.1037 2.60531C18.8205 2.60531 18.6252 2.78109 18.6935 2.97641L18.9084 3.61117C19.1037 4.20687 18.342 4.45101 18.1173 3.88461L17.7463 2.97641C17.2091 1.67758 15.9396 1.56039 15.2463 1.87289C15.0705 1.96078 15.0412 2.10726 15.1095 2.22445C15.4318 2.80062 15.6955 3.35726 15.9591 3.93344C16.2521 4.58773 15.3634 5.00766 15.0021 4.3143C14.7775 3.87484 14.4845 3.33773 14.1916 2.97641C13.1173 1.57016 11.2912 1.17953 9.30876 1.69711L6.28141 2.48812C4.29899 3.01547 5.1193 5.36898 6.95524 4.98812L9.90446 4.39242C10.8029 4.20687 11.5744 4.43148 12.0041 4.98812C12.6681 5.8768 13.3517 7.25375 13.3517 8.24984C13.3517 9.63656 12.5119 11.2772 10.7443 11.2772C9.87516 11.2772 8.85954 10.8768 7.87321 9.91L5.96891 8.04476C4.79704 6.89242 2.75602 8.39633 4.10368 9.96859L7.31657 13.7381C9.62126 16.4432 11.9552 17.6248 14.299 17.6248Z" fill="currentColor" fillOpacity="0.85" />
-                  </g>
-                </svg>
-              </button>
-            )}
-            <span style={{ color: 'var(--secondary-color)', marginLeft: 10, fontSize: 14 }}>Trim:</span>
-            <input
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', marginTop: 8, gap: 6, width: '100%' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ color: 'var(--secondary-color)', fontSize: 14 }}>
+                {pdfSize ? formatSizePoints(pdfSize.width, pdfSize.height) : ''}
+              </span>
+              {trim === 0 && (
+                <button
+                  type="button"
+                  onClick={handleSetToPdfDimensions}
+                  style={{ background: 'none', border: 'none', padding: 0, margin: 0, cursor: 'pointer', color: 'var(--secondary-color)', display: 'flex', alignItems: 'center' }}
+                  title="Reset size adjuster to PDF dimensions"
+                >
+                  <svg width="18" height="14" viewBox="0 0 22.3773 17.8571" style={{ display: 'block' }} xmlns="http://www.w3.org/2000/svg">
+                    <g>
+                      <rect height="17.8571" opacity="0" width="22.3773" x="0" y="0" />
+                      <path d="M2.46305 0.271327C1.35954 1.53109 0.509927 3.07406 0.0314117 4.68539C-0.212729 5.535 1.03727 5.97445 1.33024 4.99789C1.75016 3.59164 2.50211 2.26351 3.47868 1.15023C4.12321 0.417811 3.10758-0.451329 2.46305 0.271327ZM2.46305 14.2362C3.10758 14.9686 4.12321 14.0995 3.47868 13.3573C2.50211 12.2537 1.75016 10.9256 1.33024 9.51937C1.03727 8.53305-0.212729 8.9725 0.0314117 9.83187C0.509927 11.4432 1.35954 12.9862 2.46305 14.2362Z" fill="currentColor" fillOpacity="0.85" />
+                      <path d="M14.299 17.6248C17.922 17.6248 22.0138 15.3202 22.0138 10.3104C22.0138 7.89828 20.7443 2.60531 19.1037 2.60531C18.8205 2.60531 18.6252 2.78109 18.6935 2.97641L18.9084 3.61117C19.1037 4.20687 18.342 4.45101 18.1173 3.88461L17.7463 2.97641C17.2091 1.67758 15.9396 1.56039 15.2463 1.87289C15.0705 1.96078 15.0412 2.10726 15.1095 2.22445C15.4318 2.80062 15.6955 3.35726 15.9591 3.93344C16.2521 4.58773 15.3634 5.00766 15.0021 4.3143C14.7775 3.87484 14.4845 3.33773 14.1916 2.97641C13.1173 1.57016 11.2912 1.17953 9.30876 1.69711L6.28141 2.48812C4.29899 3.01547 5.1193 5.36898 6.95524 4.98812L9.90446 4.39242C10.8029 4.20687 11.5744 4.43148 12.0041 4.98812C12.6681 5.8768 13.3517 7.25375 13.3517 8.24984C13.3517 9.63656 12.5119 11.2772 10.7443 11.2772C9.87516 11.2772 8.85954 10.8768 7.87321 9.91L5.96891 8.04476C4.79704 6.89242 2.75602 8.39633 4.10368 9.96859L7.31657 13.7381C9.62126 16.4432 11.9552 17.6248 14.299 17.6248Z" fill="currentColor" fillOpacity="0.85" />
+                    </g>
+                  </svg>
+                </button>
+              )}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--secondary-color)', fontSize: 14 }}>
+              <label
+                title={!isTauri ? 'Requires desktop app with Ghostscript installed' :
+                  !ghostscriptAvailable ? 'Ghostscript not found. Install with: brew install ghostscript' : undefined}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  cursor: (isTauri && ghostscriptAvailable) ? 'pointer' : 'not-allowed',
+                  opacity: (isTauri && ghostscriptAvailable) ? 1 : 0.5,
+                  color: 'var(--text-color)',
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={flatten}
+                  onChange={e => setFlatten(e.target.checked)}
+                  disabled={!isTauri || !ghostscriptAvailable}
+                  style={{ marginRight: 6 }}
+                />
+                Flatten
+              </label>
+              <span>Trim:</span>
+              <input
               type="text"
               min={0}
               max={20}
@@ -1121,28 +2194,14 @@ function PDFDropZone() {
                 setTrimInput(val);
                 if (/^\d*[.,]?\d{0,2}$/.test(val)) {
                   const t = parseTrimInput(val);
-                  if (!isNaN(t) && val !== '' && val !== '.' && val !== ',') {
-                    setTrim(t);
-                    if (pdfSize && adjusters.length > 0 && (adjusters[0].source === 'pdf' || adjusters[0].source === 'trimmed')) {
-                      const trimmedWidth = Math.max(pdfSize.width - 2 * t, 1);
-                      const trimmedHeight = Math.max(pdfSize.height - 2 * t, 1);
-                      setAdjusters(adjs => [
-                        {
-                          ...adjs[0],
-                          width: Number(trimmedWidth.toFixed(2)),
-                          height: Number(trimmedHeight.toFixed(2)),
-                          source: 'trimmed',
-                        },
-                        ...adjs.slice(1)
-                      ]);
-                    }
-                  }
+                  const liveTrim = (!isNaN(t) && val !== '' && val !== '.' && val !== ',') ? t : 0;
+                  applyTrimLive(liveTrim);
                 }
               }}
               onBlur={() => {
                 const t = parseTrimInput(trimInput);
                 setTrimInput(Number.isFinite(t) ? formatTrim(t) : '');
-                if (Number.isFinite(t)) setTrim(t);
+                applyTrimLive(Number.isFinite(t) ? t : 0);
               }}
               onKeyDown={e => {
                 let t = parseTrimInput(trimInput);
@@ -1171,32 +2230,22 @@ function PDFDropZone() {
                     }
                   }
                   setTrimInput(formatTrimInput(next));
-                  setTrim(next);
-                  if (pdfSize && adjusters.length > 0 && (adjusters[0].source === 'pdf' || adjusters[0].source === 'trimmed')) {
-                    const trimmedWidth = Math.max(pdfSize.width - 2 * next, 1);
-                    const trimmedHeight = Math.max(pdfSize.height - 2 * next, 1);
-                    setAdjusters(adjs => [
-                      {
-                        ...adjs[0],
-                        width: Number(trimmedWidth.toFixed(2)),
-                        height: Number(trimmedHeight.toFixed(2)),
-                        source: 'trimmed',
-                      },
-                      ...adjs.slice(1)
-                    ]);
-                  }
+                  applyTrimLive(next);
                   e.preventDefault();
                 }
               }}
               style={{ width: 36, fontSize: 14, padding: '2px 2px', borderRadius: 4, border: '1px solid var(--input-border)', textAlign: 'right', marginRight: 0, background: 'var(--input-bg)', color: 'var(--text-color)' }}
-            />
-            {/* Show trimmed size and pinch icon only if trim > 0 */}
-            {trimmedForAspect && trim > 0 && (
-              <>
-                <span style={{ color: 'var(--secondary-color)', fontSize: 14 }}>→</span>
-                <span style={{ color: 'var(--secondary-color)', fontSize: 14 }}>{formatSizePoints(trimmedForAspect.width, trimmedForAspect.height)}</span>
-                <span style={{ display: 'flex', alignItems: 'center', color: 'var(--secondary-color)' }}>
-                  <button type="button" onClick={handleSetToTrimmedDimensions} style={{ background: 'none', border: 'none', padding: 0, margin: 0, cursor: 'pointer', color: 'var(--secondary-color)', display: 'flex', alignItems: 'center' }} title="Reset size adjuster to trimmed dimensions">
+              />
+              {trimmedForAspect && trim > 0 && (
+                <>
+                  <span>→</span>
+                  <span>{formatSizePoints(trimmedForAspect.width, trimmedForAspect.height)}</span>
+                  <button
+                    type="button"
+                    onClick={handleSetToTrimmedDimensions}
+                    style={{ background: 'none', border: 'none', padding: 0, margin: 0, cursor: 'pointer', color: 'var(--secondary-color)', display: 'flex', alignItems: 'center' }}
+                    title="Reset size adjuster to trimmed dimensions"
+                  >
                     <svg width="18" height="14" viewBox="0 0 22.3773 17.8571" style={{ display: 'block' }} xmlns="http://www.w3.org/2000/svg">
                       <g>
                         <rect height="17.8571" opacity="0" width="22.3773" x="0" y="0" />
@@ -1205,14 +2254,30 @@ function PDFDropZone() {
                       </g>
                     </svg>
                   </button>
-                </span>
-              </>
-            )}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+      {file && sourceKind === 'image' && imageSizePx && (
+        <div style={{
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          width: '100%',
+          maxWidth: 'none',
+          margin: '0 auto',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', marginTop: 8, gap: 8, width: '100%' }}>
+            <span style={{ color: 'var(--secondary-color)', fontSize: 14 }}>
+              {`${Math.round(imageSizePx.width)} × ${Math.round(imageSizePx.height)} px`}
+            </span>
           </div>
         </div>
       )}
       {file && (
-        <div style={{ width: '100%', maxWidth: 400, margin: '32px auto 0 auto' }}>
+        <div style={{ width: '100%', maxWidth: 500, margin: '32px auto 0 auto', overflow: 'visible' }}>
           {adjusters.map((adjuster, idx) => (
             <SizeAdjusterCard
               key={adjuster.id}
@@ -1225,62 +2290,39 @@ function PDFDropZone() {
               onRemove={() => setAdjusters(adjs => adjs.filter((_, i) => i !== idx))}
               isRemovable={adjusters.length > 1}
               aspectRatio={aspectRatio}
+              sourceSizeMm={sourceKind === 'pdf' ? trimmedForAspect : null}
+              pdfMaxDimensionMm={PDF_MAX_DIMENSION_MM}
+              pdfMinDimensionMm={PDF_MIN_DIMENSION_MM}
+              sessionScaleFactor={sessionScaleFactor}
+              onSessionScaleFactorChange={setSessionScaleFactor}
               SwapIcon={ArrowLeftArrowRight}
               RemoveIcon={MinusCircleFill}
               presets={presets}
               onEditPresets={() => setShowPresetsEditor(true)}
             />
           ))}
-          <button
-            type="button"
-            onClick={() => setAdjusters(adjs => {
-              const last = adjs[adjs.length - 1];
-              return [
-                ...adjs,
-                { ...last, id: crypto.randomUUID() }
-              ];
-            })}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 6, margin: '8px auto 0 auto', background: 'none', border: 'none', color: 'var(--text-color)', fontSize: 16, cursor: 'pointer', fontWeight: 500
-            }}
-          >
-            <PlusCircleFill style={{ width: 20, height: 20, display: 'block', color: 'var(--secondary-color)' }} />
-            <span style={{ color: 'var(--text-color)' }}>Add Size</span>
-          </button>
-        </div>
-      )}
-      {/* Export options section */}
-      {file && (
-        <div style={{
-          width: 400,
-          maxWidth: '100%',
-          margin: '24px auto 0 auto',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'flex-start',
-        }}>
-          <label
-            title={!isTauri ? 'Requires desktop app with Ghostscript installed' :
-                   !ghostscriptAvailable ? 'Ghostscript not found. Install with: brew install ghostscript' : undefined}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              fontWeight: 500,
-              fontSize: 16,
-              color: 'var(--text-color)',
-              cursor: (isTauri && ghostscriptAvailable) ? 'pointer' : 'not-allowed',
-              opacity: (isTauri && ghostscriptAvailable) ? 1 : 0.5,
-            }}
-          >
-            <input
-              type="checkbox"
-              checked={flatten}
-              onChange={e => setFlatten(e.target.checked)}
-              disabled={!isTauri || !ghostscriptAvailable}
-              style={{ marginRight: 8 }}
-            />
-            Flatten
-          </label>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 16, marginTop: 8 }}>
+            <button
+              type="button"
+              onClick={handleAddPdfAdjuster}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6, background: 'none', border: 'none', color: 'var(--text-color)', fontSize: 16, cursor: 'pointer', fontWeight: 500
+              }}
+            >
+              <PlusCircleFill style={{ width: 20, height: 20, display: 'block', color: 'var(--secondary-color)' }} />
+              <span style={{ color: 'var(--text-color)' }}>Add .pdf size</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleAddPngAdjuster}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6, background: 'none', border: 'none', color: 'var(--text-color)', fontSize: 16, cursor: 'pointer', fontWeight: 500
+              }}
+            >
+              <PlusCircleFill style={{ width: 20, height: 20, display: 'block', color: 'var(--secondary-color)' }} />
+              <span style={{ color: 'var(--text-color)' }}>Add .png</span>
+            </button>
+          </div>
         </div>
       )}
       {/* Filename Editor Section */}

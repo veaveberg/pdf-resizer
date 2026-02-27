@@ -4,7 +4,12 @@
 )]
 
 use std::path::Path;
+use std::sync::Mutex;
 use tauri::api::process::Command as SidecarCommand;
+use tauri::{Manager, State};
+
+#[derive(Default)]
+struct PendingOpenPaths(Mutex<Vec<String>>);
 
 #[tauri::command]
 fn check_file_existence(file_paths: Vec<String>) -> Vec<bool> {
@@ -24,6 +29,14 @@ fn log_path(path: String) {
     println!("Received path from frontend: {}", path);
 }
 
+#[tauri::command]
+fn take_pending_open_paths(state: State<'_, PendingOpenPaths>) -> Vec<String> {
+    let mut guard = state.0.lock().expect("pending paths mutex poisoned");
+    let paths = guard.clone();
+    guard.clear();
+    paths
+}
+
 /// Check if Ghostscript is available (via bundled sidecar).
 #[tauri::command]
 fn check_ghostscript() -> String {
@@ -33,7 +46,21 @@ fn check_ghostscript() -> String {
 
     match result {
         Ok(Ok(output)) if output.status.success() => output.stdout.trim().to_string(),
-        _ => String::new(),
+        Ok(Ok(output)) => {
+            println!(
+                "Ghostscript sidecar failed with status {:?}: {}",
+                output.status, output.stderr
+            );
+            String::new()
+        }
+        Ok(Err(e)) => {
+            println!("Failed to execute Ghostscript sidecar: {}", e);
+            String::new()
+        }
+        Err(e) => {
+            println!("Failed to create Ghostscript sidecar: {}", e);
+            String::new()
+        }
     }
 }
 
@@ -86,14 +113,42 @@ fn flatten_pdf(pdf_bytes: Vec<u8>) -> Result<Vec<u8>, String> {
     Ok(output_bytes)
 }
 
+fn collect_startup_file_paths() -> Vec<String> {
+    std::env::args()
+        .skip(1)
+        .filter_map(|arg| {
+            let p = Path::new(&arg);
+            if p.exists() && p.is_file() {
+                Some(arg)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 fn main() {
     tauri::Builder::default()
+        .manage(PendingOpenPaths::default())
+        .setup(|app| {
+            let startup_paths = collect_startup_file_paths();
+            if !startup_paths.is_empty() {
+                if let Some(main_window) = app.get_window("main") {
+                    let _ = main_window.emit("external-files-opened", startup_paths.clone());
+                }
+                let state: State<'_, PendingOpenPaths> = app.state();
+                let mut guard = state.0.lock().expect("pending paths mutex poisoned");
+                guard.extend(startup_paths);
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             greet,
             check_file_existence,
             log_path,
             check_ghostscript,
-            flatten_pdf
+            flatten_pdf,
+            take_pending_open_paths
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

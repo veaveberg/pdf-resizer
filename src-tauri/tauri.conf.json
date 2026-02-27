@@ -7,7 +7,7 @@
   },
   "package": {
     "productName": "PDF Resizer",
-    "version": "0.0.4"
+    "version": "0.2.0"
   },
   "tauri": {
     "allowlist": {
@@ -21,6 +21,10 @@
           "**",
           "$DOWNLOADS/**"
         ]
+      },
+      "shell": {
+        "sidecar": true,
+        "execute": true
       }
     },
     "bundle": {
@@ -80,7 +84,7 @@
         "minHeight": 700,
         "maxWidth": 600,
         "maxHeight": 2000,
-        "fileDropEnabled": false
+        "fileDropEnabled": true
       }
     ]
   }
