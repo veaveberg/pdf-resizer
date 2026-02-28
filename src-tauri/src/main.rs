@@ -126,10 +126,13 @@ fn run_ghostscript(args: &[&str]) -> Result<tauri::api::process::Output, String>
         // First try app-local Ghostscript binaries from the Windows release package.
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(exe_dir) = exe_path.parent() {
+                let resources_dir = exe_dir.join("resources");
                 let local_candidates = [
                     exe_dir.join("gs.exe"),
                     exe_dir.join("ghostscript").join("bin").join("gswin64c.exe"),
                     exe_dir.join("ghostscript").join("bin").join("gswin32c.exe"),
+                    resources_dir.join("ghostscript-win").join("bin").join("gswin64c.exe"),
+                    resources_dir.join("ghostscript-win").join("bin").join("gswin32c.exe"),
                 ];
                 for candidate in local_candidates {
                     if candidate.exists() {

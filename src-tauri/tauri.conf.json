@@ -54,7 +54,8 @@
         "signingIdentity": null
       },
       "resources": [
-        "bin/ghostscript"
+        "bin/ghostscript",
+        "bin/ghostscript-win"
       ],
       "shortDescription": "",
       "targets": [],

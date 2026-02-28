@@ -21,11 +21,11 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
-            target: aarch64-apple-darwin
-            args: --target aarch64-apple-darwin --bundles dmg
+            target: universal-apple-darwin
+            args: --target universal-apple-darwin --bundles dmg
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
-            args: --target x86_64-pc-windows-msvc --bundles none
+            args: --target x86_64-pc-windows-msvc --bundles msi
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -40,7 +40,7 @@ jobs:
       - name: install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -111,9 +111,10 @@ jobs:
         run: |
           choco install ghostscript -y
           New-Item -ItemType Directory -Force -Path src-tauri/bin | Out-Null
-          $gsExe = Get-ChildItem "C:\Program Files\gs\*\bin\gswin64c.exe" | Select-Object -First 1
-          if (-not $gsExe) { throw "Ghostscript executable not found." }
-          Copy-Item $gsExe.FullName "src-tauri/bin/gs-x86_64-pc-windows-msvc.exe" -Force
+          Remove-Item -Recurse -Force src-tauri/bin/ghostscript-win -ErrorAction SilentlyContinue
+          $gsRoot = Get-ChildItem "C:\Program Files\gs\gs*" -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $gsRoot) { throw "Ghostscript installation folder not found." }
+          Copy-Item $gsRoot.FullName "src-tauri/bin/ghostscript-win" -Recurse -Force
 
       - name: install frontend dependencies
         run: npm install
@@ -132,29 +133,21 @@ jobs:
           fi
           cp "$DMG_PATH" "artifacts/PDF-Resizer-macOS.dmg"
 
-      - name: Package portable app (Windows)
+      - name: Prepare MSI artifact (Windows)
         if: matrix.platform == 'windows-latest'
         shell: pwsh
         run: |
-          $releaseDir = "src-tauri/target/${{ matrix.target }}/release"
           $artifactDir = "artifacts"
-          $portableDir = "$releaseDir/windows-portable"
           New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
-          New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
-          Copy-Item "$releaseDir/PDF Resizer.exe" "$portableDir/PDF Resizer.exe" -Force
-          $gsRoot = Get-ChildItem "C:\Program Files\gs\gs*" -Directory | Sort-Object Name -Descending | Select-Object -First 1
-          if (-not $gsRoot) { throw "Ghostscript installation folder not found." }
-          Copy-Item $gsRoot.FullName "$portableDir/ghostscript" -Recurse -Force
-          Compress-Archive -Path "$portableDir/*" -DestinationPath "$artifactDir/PDF-Resizer-Windows.zip" -Force
-          if (Get-Command 7z.exe -ErrorAction SilentlyContinue) {
-            7z a -sfx "$artifactDir/PDF-Resizer-Windows-SFX.exe" "$portableDir\*" | Out-Null
-          }
+          $msi = Get-ChildItem "src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi" | Select-Object -First 1
+          if (-not $msi) { throw "MSI artifact not found." }
+          Copy-Item $msi.FullName "$artifactDir/PDF-Resizer-Windows.msi" -Force
 
       - name: Upload macOS artifact
         if: matrix.platform == 'macos-latest'
         uses: actions/upload-artifact@v4
         with:
-          name: macOS
+          name: PDF-Resizer-macOS
           if-no-files-found: error
           path: "artifacts/PDF-Resizer-macOS.dmg"
 
@@ -162,11 +155,9 @@ jobs:
         if: matrix.platform == 'windows-latest'
         uses: actions/upload-artifact@v4
         with:
-          name: Windows
+          name: PDF-Resizer-Windows
           if-no-files-found: error
-          path: |
-            artifacts/PDF-Resizer-Windows.zip
-            artifacts/PDF-Resizer-Windows-SFX.exe
+          path: "artifacts/PDF-Resizer-Windows.msi"
 
   publish_release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -187,5 +178,4 @@ jobs:
         with:
           files: |
             artifacts/PDF-Resizer-macOS.dmg
-            artifacts/PDF-Resizer-Windows.zip
-            artifacts/PDF-Resizer-Windows-SFX.exe
+            artifacts/PDF-Resizer-Windows.msi
