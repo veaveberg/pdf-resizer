@@ -37,34 +37,61 @@ fn take_pending_open_paths(state: State<'_, PendingOpenPaths>) -> Vec<String> {
     paths
 }
 
-/// Check if Ghostscript is available (via bundled sidecar).
+#[cfg(target_os = "windows")]
+const GHOSTSCRIPT_FALLBACK_COMMANDS: [&str; 3] = ["gswin64c", "gswin32c", "gs"];
+#[cfg(not(target_os = "windows"))]
+const GHOSTSCRIPT_FALLBACK_COMMANDS: [&str; 1] = ["gs"];
+
+fn run_ghostscript(args: &[&str]) -> Result<tauri::api::process::Output, String> {
+    // First try the bundled sidecar.
+    if let Ok(cmd) = SidecarCommand::new_sidecar("gs") {
+        match cmd.args(args).output() {
+            Ok(output) if output.status.success() => return Ok(output),
+            Ok(output) => {
+                println!(
+                    "Ghostscript sidecar failed with status {:?}: {}",
+                    output.status, output.stderr
+                );
+            }
+            Err(e) => {
+                println!("Failed to execute Ghostscript sidecar: {}", e);
+            }
+        }
+    }
+
+    // Fallback to system Ghostscript if available on PATH.
+    let mut last_error = String::from("Ghostscript is not available.");
+    for command in GHOSTSCRIPT_FALLBACK_COMMANDS {
+        match SidecarCommand::new(command).args(args).output() {
+            Ok(output) if output.status.success() => return Ok(output),
+            Ok(output) => {
+                last_error = format!(
+                    "Ghostscript command '{}' failed with status {:?}: {}",
+                    command, output.status, output.stderr
+                );
+            }
+            Err(e) => {
+                last_error = format!("Failed to execute Ghostscript command '{}': {}", command, e);
+            }
+        }
+    }
+
+    Err(last_error)
+}
+
+/// Check if Ghostscript is available (bundled or on PATH).
 #[tauri::command]
 fn check_ghostscript() -> String {
-    let result = SidecarCommand::new_sidecar("gs")
-        .map(|cmd| cmd.args(["--version"]).output())
-        .map_err(|e| e.to_string());
-
-    match result {
-        Ok(Ok(output)) if output.status.success() => output.stdout.trim().to_string(),
-        Ok(Ok(output)) => {
-            println!(
-                "Ghostscript sidecar failed with status {:?}: {}",
-                output.status, output.stderr
-            );
-            String::new()
-        }
-        Ok(Err(e)) => {
-            println!("Failed to execute Ghostscript sidecar: {}", e);
-            String::new()
-        }
+    match run_ghostscript(&["--version"]) {
+        Ok(output) => output.stdout.trim().to_string(),
         Err(e) => {
-            println!("Failed to create Ghostscript sidecar: {}", e);
+            println!("Ghostscript availability check failed: {}", e);
             String::new()
         }
     }
 }
 
-/// Flatten a PDF using bundled Ghostscript sidecar.
+/// Flatten a PDF using Ghostscript (bundled sidecar preferred).
 #[tauri::command]
 fn flatten_pdf(pdf_bytes: Vec<u8>) -> Result<Vec<u8>, String> {
     use std::io::Write;
@@ -78,22 +105,20 @@ fn flatten_pdf(pdf_bytes: Vec<u8>) -> Result<Vec<u8>, String> {
         .and_then(|mut f| f.write_all(&pdf_bytes))
         .map_err(|e| format!("Failed to write temp input file: {}", e))?;
 
-    // Run Ghostscript sidecar
-    let result = SidecarCommand::new_sidecar("gs")
-        .map_err(|e| format!("Failed to create sidecar command: {}", e))?
-        .args([
-            "-dBATCH",
-            "-dNOPAUSE",
-            "-dSAFER",
-            "-dQUIET",
-            "-sDEVICE=pdfwrite",
-            "-dNoOutputFonts",
-            "-dCompatibilityLevel=1.7",
-            &format!("-sOutputFile={}", output_path.display()),
-            &format!("{}", input_path.display()),
-        ])
-        .output()
-        .map_err(|e| format!("Failed to run Ghostscript sidecar: {}", e))?;
+    let output_file_arg = format!("-sOutputFile={}", output_path.display());
+    let input_file_arg = format!("{}", input_path.display());
+    let args = [
+        "-dBATCH",
+        "-dNOPAUSE",
+        "-dSAFER",
+        "-dQUIET",
+        "-sDEVICE=pdfwrite",
+        "-dNoOutputFonts",
+        "-dCompatibilityLevel=1.7",
+        output_file_arg.as_str(),
+        input_file_arg.as_str(),
+    ];
+    let result = run_ghostscript(&args)?;
 
     if !result.status.success() {
         let stderr = result.stderr;

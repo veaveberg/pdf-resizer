@@ -1168,6 +1168,7 @@ function PDFDropZone() {
 
   // Helper to detect Tauri
   const isTauri = typeof window !== 'undefined' && Boolean((window as any).__TAURI_IPC__);
+  const isWindows = typeof navigator !== 'undefined' && /Win/i.test(navigator.platform || navigator.userAgent);
   const isFileSystemAccessSupported = typeof window !== 'undefined' && 'showDirectoryPicker' in window;
   const isExportDirSupported = isTauri || isFileSystemAccessSupported;
 
@@ -2164,7 +2165,11 @@ function PDFDropZone() {
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--secondary-color)', fontSize: 14 }}>
               <label
                 title={!isTauri ? 'Requires desktop app with Ghostscript installed' :
-                  !ghostscriptAvailable ? 'Ghostscript not found. Install with: brew install ghostscript' : undefined}
+                  !ghostscriptAvailable
+                    ? (isWindows
+                      ? 'Ghostscript is unavailable. Use the portable ZIP build (includes gs.exe) or install Ghostscript.'
+                      : 'Ghostscript is unavailable. This app expects a bundled sidecar; install Ghostscript only as fallback.')
+                    : undefined}
                 style={{
                   display: 'flex',
                   alignItems: 'center',

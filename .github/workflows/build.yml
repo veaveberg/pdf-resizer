@@ -21,7 +21,7 @@ jobs:
             args: --target universal-apple-darwin --bundles app
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
-            args: --target x86_64-pc-windows-msvc --bundles msi
+            args: --target x86_64-pc-windows-msvc --bundles none
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -72,6 +72,20 @@ jobs:
       - name: Build Tauri bundles
         run: npm run tauri build -- ${{ matrix.args }}
 
+      - name: Package portable app (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $releaseDir = "src-tauri/target/${{ matrix.target }}/release"
+          $portableDir = "$releaseDir/portable/PDF Resizer"
+          $bundleDir = "$releaseDir/bundle/portable"
+          New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
+          New-Item -ItemType Directory -Force -Path $bundleDir | Out-Null
+          Copy-Item "$releaseDir/PDF Resizer.exe" "$portableDir/PDF Resizer.exe" -Force
+          # Sidecar must be named `gs.exe` beside the app executable for portable runs.
+          Copy-Item "src-tauri/bin/gs-x86_64-pc-windows-msvc.exe" "$portableDir/gs.exe" -Force
+          Compress-Archive -Path "$portableDir/*" -DestinationPath "$bundleDir/PDF-Resizer-windows-portable-x64.zip" -Force
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -80,10 +94,9 @@ jobs:
           path: |
             src-tauri/target/${{ matrix.target }}/release/bundle/**/*.app
             src-tauri/target/${{ matrix.target }}/release/bundle/**/*.dmg
-            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.msi
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*portable*.zip
             src-tauri/target/${{ matrix.target }}/release/bundle/**/*.exe
             src-tauri/target/release/bundle/**/*.app
             src-tauri/target/release/bundle/**/*.dmg
-            src-tauri/target/release/bundle/**/*.msi
+            src-tauri/target/release/bundle/**/*portable*.zip
             src-tauri/target/release/bundle/**/*.exe
-            src-tauri/target/release/PDF Resizer.exe
