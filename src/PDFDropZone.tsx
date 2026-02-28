@@ -2167,7 +2167,7 @@ function PDFDropZone() {
                 title={!isTauri ? 'Requires desktop app with Ghostscript installed' :
                   !ghostscriptAvailable
                     ? (isWindows
-                      ? 'Ghostscript is unavailable. Use the portable ZIP build (includes gs.exe) or install Ghostscript.'
+                      ? 'Ghostscript is unavailable. This Windows build should include embedded Ghostscript; try the latest release.'
                       : 'Ghostscript is unavailable. This app expects a bundled sidecar; install Ghostscript only as fallback.')
                     : undefined}
                 style={{

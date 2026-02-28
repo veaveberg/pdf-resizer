@@ -42,24 +42,77 @@ const GHOSTSCRIPT_FALLBACK_COMMANDS: [&str; 3] = ["gswin64c", "gswin32c", "gs"];
 #[cfg(not(target_os = "windows"))]
 const GHOSTSCRIPT_FALLBACK_COMMANDS: [&str; 1] = ["gs"];
 
+#[cfg(target_os = "windows")]
+const EMBEDDED_GHOSTSCRIPT_BYTES: &[u8] = include_bytes!("../bin/gs-x86_64-pc-windows-msvc.exe");
+
+#[cfg(target_os = "windows")]
+fn ensure_embedded_ghostscript_exe() -> Result<std::path::PathBuf, String> {
+    let app_tmp_dir = std::env::temp_dir().join("pdfresizer");
+    std::fs::create_dir_all(&app_tmp_dir)
+        .map_err(|e| format!("Failed to create temp dir for embedded Ghostscript: {}", e))?;
+
+    let embedded_exe_path = app_tmp_dir.join("gs-embedded.exe");
+    let needs_write = match std::fs::metadata(&embedded_exe_path) {
+        Ok(metadata) => metadata.len() != EMBEDDED_GHOSTSCRIPT_BYTES.len() as u64,
+        Err(_) => true,
+    };
+
+    if needs_write {
+        std::fs::write(&embedded_exe_path, EMBEDDED_GHOSTSCRIPT_BYTES)
+            .map_err(|e| format!("Failed to extract embedded Ghostscript: {}", e))?;
+    }
+
+    Ok(embedded_exe_path)
+}
+
 fn run_ghostscript(args: &[&str]) -> Result<tauri::api::process::Output, String> {
-    // First try the bundled sidecar.
-    if let Ok(cmd) = SidecarCommand::new_sidecar("gs") {
-        match cmd.args(args).output() {
-            Ok(output) if output.status.success() => return Ok(output),
-            Ok(output) => {
-                println!(
-                    "Ghostscript sidecar failed with status {:?}: {}",
-                    output.status, output.stderr
-                );
+    #[cfg(target_os = "windows")]
+    {
+        // On Windows we embed Ghostscript bytes in the app binary and execute an extracted temp copy.
+        match ensure_embedded_ghostscript_exe() {
+            Ok(embedded_path) => {
+                match SidecarCommand::new(embedded_path.to_string_lossy().to_string())
+                    .args(args)
+                    .output()
+                {
+                    Ok(output) if output.status.success() => return Ok(output),
+                    Ok(output) => {
+                        println!(
+                            "Embedded Ghostscript failed with status {:?}: {}",
+                            output.status, output.stderr
+                        );
+                    }
+                    Err(e) => {
+                        println!("Failed to execute embedded Ghostscript: {}", e);
+                    }
+                }
             }
             Err(e) => {
-                println!("Failed to execute Ghostscript sidecar: {}", e);
+                println!("{}", e);
             }
         }
     }
 
-    // Fallback to system Ghostscript if available on PATH.
+    #[cfg(not(target_os = "windows"))]
+    {
+        // On non-Windows builds, try the bundled sidecar first.
+        if let Ok(cmd) = SidecarCommand::new_sidecar("gs") {
+            match cmd.args(args).output() {
+                Ok(output) if output.status.success() => return Ok(output),
+                Ok(output) => {
+                    println!(
+                        "Ghostscript sidecar failed with status {:?}: {}",
+                        output.status, output.stderr
+                    );
+                }
+                Err(e) => {
+                    println!("Failed to execute Ghostscript sidecar: {}", e);
+                }
+            }
+        }
+    }
+
+    // Last fallback to system Ghostscript on PATH.
     let mut last_error = String::from("Ghostscript is not available.");
     for command in GHOSTSCRIPT_FALLBACK_COMMANDS {
         match SidecarCommand::new(command).args(args).output() {
