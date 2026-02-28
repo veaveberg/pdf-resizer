@@ -53,7 +53,9 @@
         "providerShortName": null,
         "signingIdentity": null
       },
-      "resources": [],
+      "resources": [
+        "bin/ghostscript"
+      ],
       "shortDescription": "",
       "targets": [],
       "windows": {

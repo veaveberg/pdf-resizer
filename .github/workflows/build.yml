@@ -17,8 +17,8 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
-            target: universal-apple-darwin
-            args: --target universal-apple-darwin --bundles dmg
+            target: aarch64-apple-darwin
+            args: --target aarch64-apple-darwin --bundles dmg
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
             args: --target x86_64-pc-windows-msvc --bundles none
@@ -36,25 +36,67 @@ jobs:
       - name: install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'x86_64-apple-darwin,aarch64-apple-darwin' || '' }}
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
           prefix-key: "v1"
 
-      - name: Install Ghostscript (macOS)
+      - name: Prepare portable Ghostscript runtime (macOS)
         if: matrix.platform == 'macos-latest'
         run: |
           brew install ghostscript
-          mkdir -p src-tauri/bin
-          # Create sidecars for both architectures
-          cp $(which gs) src-tauri/bin/gs-x86_64-apple-darwin
-          cp $(which gs) src-tauri/bin/gs-aarch64-apple-darwin
-          # For universal build we often need them to exist at these exact names
-          # but the target universal-apple-darwin is special.
-          # We'll also provide the target specific one.
-          cp $(which gs) src-tauri/bin/gs-universal-apple-darwin
+          GS_PREFIX="$(brew --prefix ghostscript)"
+          GS_ROOT="src-tauri/bin/ghostscript"
+          GS_BIN_DIR="$GS_ROOT/bin"
+          GS_LIB_DIR="$GS_ROOT/lib"
+          GS_SHARE_DIR="$GS_ROOT/share"
+
+          rm -rf "$GS_ROOT"
+          mkdir -p "$GS_BIN_DIR" "$GS_LIB_DIR" "$GS_SHARE_DIR"
+
+          cp "$GS_PREFIX/bin/gs" "$GS_BIN_DIR/gs"
+          cp -R "$GS_PREFIX/share/ghostscript" "$GS_SHARE_DIR/"
+
+          collect_deps() {
+            local file="$1"
+            otool -L "$file" | awk 'NR>1 {print $1}' | grep -E '^(/opt/homebrew|/usr/local)' || true
+          }
+
+          # Copy first-level dependencies.
+          for dep in $(collect_deps "$GS_BIN_DIR/gs"); do
+            cp -f "$dep" "$GS_LIB_DIR/"
+          done
+
+          # Copy one additional dependency level for dylibs.
+          for lib in "$GS_LIB_DIR"/*.dylib; do
+            [ -f "$lib" ] || continue
+            for dep in $(collect_deps "$lib"); do
+              cp -f "$dep" "$GS_LIB_DIR/"
+            done
+          done
+
+          # Rewrite gs binary to load dylibs from bundled lib dir.
+          for dep in $(collect_deps "$GS_BIN_DIR/gs"); do
+            base="$(basename "$dep")"
+            if [ -f "$GS_LIB_DIR/$base" ]; then
+              install_name_tool -change "$dep" "@executable_path/../lib/$base" "$GS_BIN_DIR/gs" || true
+            fi
+          done
+
+          # Rewrite bundled dylibs to reference each other via @loader_path.
+          for lib in "$GS_LIB_DIR"/*.dylib; do
+            [ -f "$lib" ] || continue
+            base="$(basename "$lib")"
+            install_name_tool -id "@loader_path/$base" "$lib" || true
+            for dep in $(collect_deps "$lib"); do
+              dep_base="$(basename "$dep")"
+              if [ -f "$GS_LIB_DIR/$dep_base" ]; then
+                install_name_tool -change "$dep" "@loader_path/$dep_base" "$lib" || true
+              fi
+            done
+          done
 
       - name: Install Ghostscript (Windows)
         if: matrix.platform == 'windows-latest'

@@ -5,6 +5,7 @@
 
 use std::path::Path;
 use std::sync::Mutex;
+use std::collections::HashMap;
 use tauri::api::process::Command as SidecarCommand;
 use tauri::{Manager, State};
 
@@ -43,6 +44,79 @@ const GHOSTSCRIPT_FALLBACK_COMMANDS: [&str; 3] = ["gswin64c", "gswin32c", "gs"];
 const GHOSTSCRIPT_FALLBACK_COMMANDS: [&str; 1] = ["gs"];
 
 fn run_ghostscript(args: &[&str]) -> Result<tauri::api::process::Output, String> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                let resource_dir = exe_dir.join("../Resources");
+                let dev_resource_dir = std::env::current_dir()
+                    .ok()
+                    .map(|d| d.join("src-tauri").join("bin").join("ghostscript"));
+                let local_candidates = [
+                    resource_dir.join("ghostscript").join("bin").join("gs"),
+                    dev_resource_dir
+                        .as_ref()
+                        .map(|p| p.join("bin").join("gs"))
+                        .unwrap_or_default(),
+                    exe_dir.join("gs"),
+                    exe_dir.join("gs-aarch64-apple-darwin"),
+                    exe_dir.join("gs-x86_64-apple-darwin"),
+                    exe_dir.join("gs-universal-apple-darwin"),
+                    resource_dir.join("gs"),
+                    resource_dir.join("gs-aarch64-apple-darwin"),
+                    resource_dir.join("gs-x86_64-apple-darwin"),
+                    resource_dir.join("gs-universal-apple-darwin"),
+                ];
+                for candidate in local_candidates {
+                    if candidate.exists() {
+                        let mut cmd = SidecarCommand::new(candidate.to_string_lossy().to_string());
+                        cmd = cmd.args(args);
+
+                        if let Some(gs_root) = candidate.parent().and_then(|p| p.parent()) {
+                            let share_ghostscript = gs_root.join("share").join("ghostscript");
+                            if share_ghostscript.exists() {
+                                let mut gs_lib_entries = Vec::new();
+                                if let Ok(entries) = std::fs::read_dir(&share_ghostscript) {
+                                    for entry in entries.flatten() {
+                                        let path = entry.path();
+                                        if path.is_dir() {
+                                            let lib_path = path.join("lib");
+                                            let resource_path = path.join("Resource");
+                                            if lib_path.exists() {
+                                                gs_lib_entries.push(lib_path.to_string_lossy().to_string());
+                                            }
+                                            if resource_path.exists() {
+                                                gs_lib_entries.push(resource_path.to_string_lossy().to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                                if !gs_lib_entries.is_empty() {
+                                    let mut envs = HashMap::new();
+                                    envs.insert("GS_LIB".to_string(), gs_lib_entries.join(":"));
+                                    cmd = cmd.envs(envs);
+                                }
+                            }
+                        }
+
+                        match cmd.output() {
+                            Ok(output) if output.status.success() => return Ok(output),
+                            Ok(output) => {
+                                println!(
+                                    "App-local macOS Ghostscript failed with status {:?}: {}",
+                                    output.status, output.stderr
+                                );
+                            }
+                            Err(e) => {
+                                println!("Failed to execute app-local macOS Ghostscript: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[cfg(target_os = "windows")]
     {
         // First try app-local Ghostscript binaries from the Windows release package.
