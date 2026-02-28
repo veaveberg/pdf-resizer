@@ -64,45 +64,45 @@ jobs:
           cp -R "$GS_PREFIX/share/ghostscript" "$GS_SHARE_DIR/"
 
           python3 - <<'PY'
-import subprocess, shutil, pathlib
+            import subprocess, shutil, pathlib
 
-GS_BIN = pathlib.Path("src-tauri/bin/ghostscript/bin/gs").resolve()
-LIB_DIR = GS_BIN.parent.parent / "lib"
-LIB_DIR.mkdir(parents=True, exist_ok=True)
+            GS_BIN = pathlib.Path("src-tauri/bin/ghostscript/bin/gs").resolve()
+            LIB_DIR = GS_BIN.parent.parent / "lib"
+            LIB_DIR.mkdir(parents=True, exist_ok=True)
 
-def deps(path: pathlib.Path):
-    out = subprocess.check_output(["otool", "-L", str(path)], text=True)
-    for line in out.splitlines()[1:]:
-        lib = line.strip().split(" ")[0]
-        if lib.startswith(("/opt/homebrew", "/usr/local")):
-            yield pathlib.Path(lib)
+            def deps(path: pathlib.Path):
+                out = subprocess.check_output(["otool", "-L", str(path)], text=True)
+                for line in out.splitlines()[1:]:
+                    lib = line.strip().split(" ")[0]
+                    if lib.startswith(("/opt/homebrew", "/usr/local")):
+                        yield pathlib.Path(lib)
 
-visited = set()
-queue = [GS_BIN]
-while queue:
-    item = queue.pop()
-    if item in visited:
-        continue
-    visited.add(item)
-    for dep in deps(item):
-        target = LIB_DIR / dep.name
-        if not target.exists():
-            shutil.copy2(dep, target)
-            queue.append(target)
+            visited = set()
+            queue = [GS_BIN]
+            while queue:
+                item = queue.pop()
+                if item in visited:
+                    continue
+                visited.add(item)
+                for dep in deps(item):
+                    target = LIB_DIR / dep.name
+                    if not target.exists():
+                        shutil.copy2(dep, target)
+                        queue.append(target)
 
-# Rewrite ids and inter-lib links to use @loader_path
-for lib in LIB_DIR.glob("*.dylib"):
-    subprocess.run(["install_name_tool", "-id", f"@loader_path/{lib.name}", str(lib)], check=False)
-    for dep in deps(lib):
-        dep_base = dep.name
-        if (LIB_DIR / dep_base).exists():
-            subprocess.run(["install_name_tool", "-change", str(dep), f"@loader_path/{dep_base}", str(lib)], check=False)
+            # Rewrite ids and inter-lib links to use @loader_path
+            for lib in LIB_DIR.glob("*.dylib"):
+                subprocess.run(["install_name_tool", "-id", f"@loader_path/{lib.name}", str(lib)], check=False)
+                for dep in deps(lib):
+                    dep_base = dep.name
+                    if (LIB_DIR / dep_base).exists():
+                        subprocess.run(["install_name_tool", "-change", str(dep), f"@loader_path/{dep_base}", str(lib)], check=False)
 
-# Point gs to bundled libs
-for dep in deps(GS_BIN):
-    dep_base = dep.name
-    if (LIB_DIR / dep_base).exists():
-        subprocess.run(["install_name_tool", "-change", str(dep), f"@executable_path/../lib/{dep_base}", str(GS_BIN)], check=False)
+            # Point gs to bundled libs
+            for dep in deps(GS_BIN):
+                dep_base = dep.name
+                if (LIB_DIR / dep_base).exists():
+                    subprocess.run(["install_name_tool", "-change", str(dep), f"@executable_path/../lib/{dep_base}", str(GS_BIN)], check=False)
 PY
 
       - name: Install Ghostscript (Windows)
