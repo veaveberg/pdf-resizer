@@ -8,6 +8,10 @@ on:
       - 'v*'
   workflow_dispatch:
 
+concurrency:
+  group: build-apps-${{ github.sha }}
+  cancel-in-progress: true
+
 jobs:
   build:
     permissions:
@@ -59,44 +63,47 @@ jobs:
           cp "$GS_PREFIX/bin/gs" "$GS_BIN_DIR/gs"
           cp -R "$GS_PREFIX/share/ghostscript" "$GS_SHARE_DIR/"
 
-          collect_deps() {
-            local file="$1"
-            otool -L "$file" | awk 'NR>1 {print $1}' | grep -E '^(/opt/homebrew|/usr/local)' || true
-          }
+          python3 - <<'PY'
+import subprocess, shutil, pathlib
 
-          # Copy first-level dependencies.
-          for dep in $(collect_deps "$GS_BIN_DIR/gs"); do
-            cp -f "$dep" "$GS_LIB_DIR/"
-          done
+GS_BIN = pathlib.Path("src-tauri/bin/ghostscript/bin/gs").resolve()
+LIB_DIR = GS_BIN.parent.parent / "lib"
+LIB_DIR.mkdir(parents=True, exist_ok=True)
 
-          # Copy one additional dependency level for dylibs.
-          for lib in "$GS_LIB_DIR"/*.dylib; do
-            [ -f "$lib" ] || continue
-            for dep in $(collect_deps "$lib"); do
-              cp -f "$dep" "$GS_LIB_DIR/"
-            done
-          done
+def deps(path: pathlib.Path):
+    out = subprocess.check_output(["otool", "-L", str(path)], text=True)
+    for line in out.splitlines()[1:]:
+        lib = line.strip().split(" ")[0]
+        if lib.startswith(("/opt/homebrew", "/usr/local")):
+            yield pathlib.Path(lib)
 
-          # Rewrite gs binary to load dylibs from bundled lib dir.
-          for dep in $(collect_deps "$GS_BIN_DIR/gs"); do
-            base="$(basename "$dep")"
-            if [ -f "$GS_LIB_DIR/$base" ]; then
-              install_name_tool -change "$dep" "@executable_path/../lib/$base" "$GS_BIN_DIR/gs" || true
-            fi
-          done
+visited = set()
+queue = [GS_BIN]
+while queue:
+    item = queue.pop()
+    if item in visited:
+        continue
+    visited.add(item)
+    for dep in deps(item):
+        target = LIB_DIR / dep.name
+        if not target.exists():
+            shutil.copy2(dep, target)
+            queue.append(target)
 
-          # Rewrite bundled dylibs to reference each other via @loader_path.
-          for lib in "$GS_LIB_DIR"/*.dylib; do
-            [ -f "$lib" ] || continue
-            base="$(basename "$lib")"
-            install_name_tool -id "@loader_path/$base" "$lib" || true
-            for dep in $(collect_deps "$lib"); do
-              dep_base="$(basename "$dep")"
-              if [ -f "$GS_LIB_DIR/$dep_base" ]; then
-                install_name_tool -change "$dep" "@loader_path/$dep_base" "$lib" || true
-              fi
-            done
-          done
+# Rewrite ids and inter-lib links to use @loader_path
+for lib in LIB_DIR.glob("*.dylib"):
+    subprocess.run(["install_name_tool", "-id", f"@loader_path/{lib.name}", str(lib)], check=False)
+    for dep in deps(lib):
+        dep_base = dep.name
+        if (LIB_DIR / dep_base).exists():
+            subprocess.run(["install_name_tool", "-change", str(dep), f"@loader_path/{dep_base}", str(lib)], check=False)
+
+# Point gs to bundled libs
+for dep in deps(GS_BIN):
+    dep_base = dep.name
+    if (LIB_DIR / dep_base).exists():
+        subprocess.run(["install_name_tool", "-change", str(dep), f"@executable_path/../lib/{dep_base}", str(GS_BIN)], check=False)
+PY
 
       - name: Install Ghostscript (Windows)
         if: matrix.platform == 'windows-latest'
@@ -139,6 +146,9 @@ jobs:
           if (-not $gsRoot) { throw "Ghostscript installation folder not found." }
           Copy-Item $gsRoot.FullName "$portableDir/ghostscript" -Recurse -Force
           Compress-Archive -Path "$portableDir/*" -DestinationPath "$artifactDir/PDF-Resizer-Windows.zip" -Force
+          if (Get-Command 7z.exe -ErrorAction SilentlyContinue) {
+            7z a -sfx "$artifactDir/PDF-Resizer-Windows-SFX.exe" "$portableDir\*" | Out-Null
+          }
 
       - name: Upload macOS artifact
         if: matrix.platform == 'macos-latest'
@@ -154,7 +164,9 @@ jobs:
         with:
           name: Windows
           if-no-files-found: error
-          path: "artifacts/PDF-Resizer-Windows.zip"
+          path: |
+            artifacts/PDF-Resizer-Windows.zip
+            artifacts/PDF-Resizer-Windows-SFX.exe
 
   publish_release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -176,3 +188,4 @@ jobs:
           files: |
             artifacts/PDF-Resizer-macOS.dmg
             artifacts/PDF-Resizer-Windows.zip
+            artifacts/PDF-Resizer-Windows-SFX.exe

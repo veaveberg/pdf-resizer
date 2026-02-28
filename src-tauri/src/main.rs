@@ -40,7 +40,9 @@ fn take_pending_open_paths(state: State<'_, PendingOpenPaths>) -> Vec<String> {
 
 #[cfg(target_os = "windows")]
 const GHOSTSCRIPT_FALLBACK_COMMANDS: [&str; 3] = ["gswin64c", "gswin32c", "gs"];
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+const GHOSTSCRIPT_FALLBACK_COMMANDS: [&str; 3] = ["gs", "/opt/homebrew/bin/gs", "/usr/local/bin/gs"];
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
 const GHOSTSCRIPT_FALLBACK_COMMANDS: [&str; 1] = ["gs"];
 
 fn run_ghostscript(args: &[&str]) -> Result<tauri::api::process::Output, String> {
@@ -49,24 +51,26 @@ fn run_ghostscript(args: &[&str]) -> Result<tauri::api::process::Output, String>
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(exe_dir) = exe_path.parent() {
                 let resource_dir = exe_dir.join("../Resources");
-                let dev_resource_dir = std::env::current_dir()
-                    .ok()
-                    .map(|d| d.join("src-tauri").join("bin").join("ghostscript"));
-                let local_candidates = [
+                let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+                #[allow(unused_mut)]
+                let mut local_candidates = vec![
+                    manifest_dir.join("bin").join("ghostscript").join("bin").join("gs"),
                     resource_dir.join("ghostscript").join("bin").join("gs"),
-                    dev_resource_dir
-                        .as_ref()
-                        .map(|p| p.join("bin").join("gs"))
-                        .unwrap_or_default(),
-                    exe_dir.join("gs"),
-                    exe_dir.join("gs-aarch64-apple-darwin"),
-                    exe_dir.join("gs-x86_64-apple-darwin"),
-                    exe_dir.join("gs-universal-apple-darwin"),
                     resource_dir.join("gs"),
                     resource_dir.join("gs-aarch64-apple-darwin"),
                     resource_dir.join("gs-x86_64-apple-darwin"),
                     resource_dir.join("gs-universal-apple-darwin"),
                 ];
+
+                // In packaged builds, Tauri may place sidecars next to the executable.
+                #[cfg(not(debug_assertions))]
+                {
+                    local_candidates.push(exe_dir.join("gs"));
+                    local_candidates.push(exe_dir.join("gs-aarch64-apple-darwin"));
+                    local_candidates.push(exe_dir.join("gs-x86_64-apple-darwin"));
+                    local_candidates.push(exe_dir.join("gs-universal-apple-darwin"));
+                }
+
                 for candidate in local_candidates {
                     if candidate.exists() {
                         let mut cmd = SidecarCommand::new(candidate.to_string_lossy().to_string());
@@ -150,7 +154,7 @@ fn run_ghostscript(args: &[&str]) -> Result<tauri::api::process::Output, String>
         }
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
     {
         // On non-Windows builds, try the bundled sidecar first.
         if let Ok(cmd) = SidecarCommand::new_sidecar("gs") {
@@ -172,6 +176,9 @@ fn run_ghostscript(args: &[&str]) -> Result<tauri::api::process::Output, String>
     // Last fallback to system Ghostscript on PATH.
     let mut last_error = String::from("Ghostscript is not available.");
     for command in GHOSTSCRIPT_FALLBACK_COMMANDS {
+        if command.starts_with('/') && !std::path::Path::new(command).exists() {
+            continue;
+        }
         match SidecarCommand::new(command).args(args).output() {
             Ok(output) if output.status.success() => return Ok(output),
             Ok(output) => {
@@ -195,7 +202,14 @@ fn check_ghostscript() -> String {
     match run_ghostscript(&["--version"]) {
         Ok(output) => output.stdout.trim().to_string(),
         Err(e) => {
-            println!("Ghostscript availability check failed: {}", e);
+            // Missing Ghostscript is an expected state in dev; keep logs quiet for ENOENT-like cases.
+            let lower = e.to_lowercase();
+            let missing = lower.contains("no such file or directory")
+                || lower.contains("not available")
+                || lower.contains("not found");
+            if !missing {
+                println!("Ghostscript availability check failed: {}", e);
+            }
             String::new()
         }
     }
