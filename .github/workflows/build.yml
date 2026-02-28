@@ -81,7 +81,7 @@ jobs:
             echo "DMG artifact not found"
             exit 1
           fi
-          cp "$DMG_PATH" "artifacts/PDF Resizer.dmg"
+          cp "$DMG_PATH" "artifacts/PDF-Resizer-macOS.dmg"
 
       - name: Package portable app (Windows)
         if: matrix.platform == 'windows-latest'
@@ -89,8 +89,14 @@ jobs:
         run: |
           $releaseDir = "src-tauri/target/${{ matrix.target }}/release"
           $artifactDir = "artifacts"
+          $portableDir = "$releaseDir/windows-portable"
           New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
-          Copy-Item "$releaseDir/PDF Resizer.exe" "$artifactDir/PDF Resizer.exe" -Force
+          New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
+          Copy-Item "$releaseDir/PDF Resizer.exe" "$portableDir/PDF Resizer.exe" -Force
+          $gsRoot = Get-ChildItem "C:\Program Files\gs\gs*" -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $gsRoot) { throw "Ghostscript installation folder not found." }
+          Copy-Item $gsRoot.FullName "$portableDir/ghostscript" -Recurse -Force
+          Compress-Archive -Path "$portableDir/*" -DestinationPath "$artifactDir/PDF-Resizer-Windows.zip" -Force
 
       - name: Upload macOS artifact
         if: matrix.platform == 'macos-latest'
@@ -98,7 +104,7 @@ jobs:
         with:
           name: macOS
           if-no-files-found: error
-          path: "artifacts/PDF Resizer.dmg"
+          path: "artifacts/PDF-Resizer-macOS.dmg"
 
       - name: Upload Windows artifact
         if: matrix.platform == 'windows-latest'
@@ -106,7 +112,7 @@ jobs:
         with:
           name: Windows
           if-no-files-found: error
-          path: "artifacts/PDF Resizer.exe"
+          path: "artifacts/PDF-Resizer-Windows.zip"
 
   publish_release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -126,5 +132,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/PDF Resizer.dmg
-            artifacts/PDF Resizer.exe
+            artifacts/PDF-Resizer-macOS.dmg
+            artifacts/PDF-Resizer-Windows.zip

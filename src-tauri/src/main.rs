@@ -42,53 +42,36 @@ const GHOSTSCRIPT_FALLBACK_COMMANDS: [&str; 3] = ["gswin64c", "gswin32c", "gs"];
 #[cfg(not(target_os = "windows"))]
 const GHOSTSCRIPT_FALLBACK_COMMANDS: [&str; 1] = ["gs"];
 
-#[cfg(target_os = "windows")]
-const EMBEDDED_GHOSTSCRIPT_BYTES: &[u8] = include_bytes!("../bin/gs-x86_64-pc-windows-msvc.exe");
-
-#[cfg(target_os = "windows")]
-fn ensure_embedded_ghostscript_exe() -> Result<std::path::PathBuf, String> {
-    let app_tmp_dir = std::env::temp_dir().join("pdfresizer");
-    std::fs::create_dir_all(&app_tmp_dir)
-        .map_err(|e| format!("Failed to create temp dir for embedded Ghostscript: {}", e))?;
-
-    let embedded_exe_path = app_tmp_dir.join("gs-embedded.exe");
-    let needs_write = match std::fs::metadata(&embedded_exe_path) {
-        Ok(metadata) => metadata.len() != EMBEDDED_GHOSTSCRIPT_BYTES.len() as u64,
-        Err(_) => true,
-    };
-
-    if needs_write {
-        std::fs::write(&embedded_exe_path, EMBEDDED_GHOSTSCRIPT_BYTES)
-            .map_err(|e| format!("Failed to extract embedded Ghostscript: {}", e))?;
-    }
-
-    Ok(embedded_exe_path)
-}
-
 fn run_ghostscript(args: &[&str]) -> Result<tauri::api::process::Output, String> {
     #[cfg(target_os = "windows")]
     {
-        // On Windows we embed Ghostscript bytes in the app binary and execute an extracted temp copy.
-        match ensure_embedded_ghostscript_exe() {
-            Ok(embedded_path) => {
-                match SidecarCommand::new(embedded_path.to_string_lossy().to_string())
-                    .args(args)
-                    .output()
-                {
-                    Ok(output) if output.status.success() => return Ok(output),
-                    Ok(output) => {
-                        println!(
-                            "Embedded Ghostscript failed with status {:?}: {}",
-                            output.status, output.stderr
-                        );
-                    }
-                    Err(e) => {
-                        println!("Failed to execute embedded Ghostscript: {}", e);
+        // First try app-local Ghostscript binaries from the Windows release package.
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                let local_candidates = [
+                    exe_dir.join("gs.exe"),
+                    exe_dir.join("ghostscript").join("bin").join("gswin64c.exe"),
+                    exe_dir.join("ghostscript").join("bin").join("gswin32c.exe"),
+                ];
+                for candidate in local_candidates {
+                    if candidate.exists() {
+                        match SidecarCommand::new(candidate.to_string_lossy().to_string())
+                            .args(args)
+                            .output()
+                        {
+                            Ok(output) if output.status.success() => return Ok(output),
+                            Ok(output) => {
+                                println!(
+                                    "App-local Ghostscript failed with status {:?}: {}",
+                                    output.status, output.stderr
+                                );
+                            }
+                            Err(e) => {
+                                println!("Failed to execute app-local Ghostscript: {}", e);
+                            }
+                        }
                     }
                 }
-            }
-            Err(e) => {
-                println!("{}", e);
             }
         }
     }
