@@ -18,7 +18,7 @@ jobs:
         include:
           - platform: macos-latest
             target: universal-apple-darwin
-            args: --target universal-apple-darwin --bundles app
+            args: --target universal-apple-darwin --bundles dmg
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
             args: --target x86_64-pc-windows-msvc --bundles none
@@ -72,31 +72,43 @@ jobs:
       - name: Build Tauri bundles
         run: npm run tauri build -- ${{ matrix.args }}
 
+      - name: Prepare DMG artifact (macOS)
+        if: matrix.platform == 'macos-latest'
+        run: |
+          mkdir -p artifacts
+          DMG_PATH=$(find "src-tauri/target/${{ matrix.target }}/release/bundle/dmg" -name "*.dmg" -type f | head -n 1)
+          if [ -z "$DMG_PATH" ]; then
+            echo "DMG artifact not found"
+            exit 1
+          fi
+          cp "$DMG_PATH" "artifacts/PDF Resizer.dmg"
+
       - name: Package portable app (Windows)
         if: matrix.platform == 'windows-latest'
         shell: pwsh
         run: |
           $releaseDir = "src-tauri/target/${{ matrix.target }}/release"
-          $portableDir = "$releaseDir/portable/PDF Resizer"
-          $bundleDir = "$releaseDir/bundle/portable"
+          $portableDir = "$releaseDir/portable-temp"
+          $artifactDir = "artifacts"
           New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
-          New-Item -ItemType Directory -Force -Path $bundleDir | Out-Null
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
           Copy-Item "$releaseDir/PDF Resizer.exe" "$portableDir/PDF Resizer.exe" -Force
           # Sidecar must be named `gs.exe` beside the app executable for portable runs.
           Copy-Item "src-tauri/bin/gs-x86_64-pc-windows-msvc.exe" "$portableDir/gs.exe" -Force
-          Compress-Archive -Path "$portableDir/*" -DestinationPath "$bundleDir/PDF-Resizer-windows-portable-x64.zip" -Force
+          Compress-Archive -Path "$portableDir/*" -DestinationPath "$artifactDir/PDF Resizer.zip" -Force
 
-      - name: Upload build artifacts
+      - name: Upload macOS artifact
+        if: matrix.platform == 'macos-latest'
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.platform }}-${{ matrix.target }}
+          name: macOS
           if-no-files-found: error
-          path: |
-            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.app
-            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.dmg
-            src-tauri/target/${{ matrix.target }}/release/bundle/**/*portable*.zip
-            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.exe
-            src-tauri/target/release/bundle/**/*.app
-            src-tauri/target/release/bundle/**/*.dmg
-            src-tauri/target/release/bundle/**/*portable*.zip
-            src-tauri/target/release/bundle/**/*.exe
+          path: "artifacts/PDF Resizer.dmg"
+
+      - name: Upload Windows artifact
+        if: matrix.platform == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows
+          if-no-files-found: error
+          path: "artifacts/PDF Resizer.zip"
