@@ -7,17 +7,48 @@ import subprocess
 import sys
 
 
-def collect_deps(binary: pathlib.Path):
+def dependency_entries(binary: pathlib.Path):
     output = subprocess.check_output(["otool", "-L", str(binary)], text=True)
     deps = []
     for line in output.splitlines()[1:]:
         lib = line.strip().split(" ")[0]
-        if lib.startswith(("/opt/homebrew", "/usr/local")):
-            deps.append(pathlib.Path(lib))
+        deps.append(lib)
     return deps
 
 
-def copy_recursive_closure(gs_bin: pathlib.Path, lib_dir: pathlib.Path):
+def resolve_dep_for_copy(
+    dep: str, owner: pathlib.Path, lib_dir: pathlib.Path, brew_prefix: pathlib.Path
+):
+    if dep.startswith(("/opt/homebrew", "/usr/local")):
+        path = pathlib.Path(dep)
+        return path if path.exists() else None
+
+    dep_name = pathlib.Path(dep).name
+
+    if dep.startswith("@loader_path/"):
+        # loader_path is relative to the referencing library location
+        path = owner.parent / dep_name
+        return path if path.exists() else None
+
+    if dep.startswith("@rpath/"):
+        candidates = [
+            lib_dir / dep_name,
+            owner.parent / dep_name,
+            brew_prefix / "lib" / dep_name,
+        ]
+        for opt_root in [pathlib.Path("/opt/homebrew/opt"), pathlib.Path("/usr/local/opt")]:
+            if opt_root.exists():
+                candidates.extend(opt_root.glob(f"*/lib/{dep_name}"))
+
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return None
+
+    return None
+
+
+def copy_recursive_closure(gs_bin: pathlib.Path, lib_dir: pathlib.Path, brew_prefix: pathlib.Path):
     visited = set()
     queue = [gs_bin]
 
@@ -27,12 +58,15 @@ def copy_recursive_closure(gs_bin: pathlib.Path, lib_dir: pathlib.Path):
             continue
         visited.add(current)
 
-        for dep in collect_deps(current):
-            if not dep.exists():
-                raise RuntimeError(f"Missing dependency: {dep}")
-            target = lib_dir / dep.name
+        for dep in dependency_entries(current):
+            resolved = resolve_dep_for_copy(dep, current, lib_dir, brew_prefix)
+            if not resolved:
+                continue
+            if not resolved.exists():
+                raise RuntimeError(f"Missing dependency: {resolved}")
+            target = lib_dir / resolved.name
             if not target.exists():
-                shutil.copy2(dep, target)
+                shutil.copy2(resolved, target)
                 queue.append(target)
 
 
@@ -44,28 +78,28 @@ def rewrite_install_names(gs_bin: pathlib.Path, lib_dir: pathlib.Path):
             ["install_name_tool", "-id", f"@loader_path/{lib.name}", str(lib)],
             check=False,
         )
-        for dep in collect_deps(lib):
-            dep_base = dep.name
+        for dep in dependency_entries(lib):
+            dep_base = pathlib.Path(dep).name
             if (lib_dir / dep_base).exists():
                 subprocess.run(
                     [
                         "install_name_tool",
                         "-change",
-                        str(dep),
+                        dep,
                         f"@loader_path/{dep_base}",
                         str(lib),
                     ],
                     check=False,
                 )
 
-    for dep in collect_deps(gs_bin):
-        dep_base = dep.name
+    for dep in dependency_entries(gs_bin):
+        dep_base = pathlib.Path(dep).name
         if (lib_dir / dep_base).exists():
             subprocess.run(
                 [
                     "install_name_tool",
                     "-change",
-                    str(dep),
+                    dep,
                     f"@executable_path/../lib/{dep_base}",
                     str(gs_bin),
                 ],
@@ -105,7 +139,7 @@ def main():
     # Preserve symlinks instead of dereferencing to avoid recursive copy loops.
     shutil.copytree(share_src, out_share / "ghostscript", symlinks=True)
 
-    copy_recursive_closure(gs_bin, out_lib)
+    copy_recursive_closure(gs_bin, out_lib, brew_prefix)
     rewrite_install_names(gs_bin, out_lib)
     print(f"Prepared Ghostscript runtime at {out_root}")
 
