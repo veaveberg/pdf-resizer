@@ -107,25 +107,80 @@ def rewrite_install_names(gs_bin: pathlib.Path, lib_dir: pathlib.Path):
             )
 
 
+def pick_first_existing(candidates):
+    for candidate in candidates:
+        if candidate and candidate.exists():
+            return candidate
+    return None
+
+
+def prune_recursive_symlink_loops(root: pathlib.Path):
+    for path in root.rglob("*"):
+        if not path.is_symlink():
+            continue
+        if path.name != path.parent.name:
+            continue
+        try:
+            resolved = path.resolve(strict=False)
+        except OSError:
+            path.unlink(missing_ok=True)
+            continue
+        if resolved == path.parent or resolved in path.parents:
+            path.unlink(missing_ok=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--brew-prefix", required=True)
+    parser.add_argument("--brew-prefix")
+    parser.add_argument("--gs-bin")
+    parser.add_argument("--share-dir")
     parser.add_argument("--output-root", required=True)
     args = parser.parse_args()
 
-    brew_prefix = pathlib.Path(args.brew_prefix)
+    brew_prefix = pathlib.Path(args.brew_prefix) if args.brew_prefix else None
     out_root = pathlib.Path(args.output_root)
     out_bin = out_root / "bin"
     out_lib = out_root / "lib"
     out_share = out_root / "share"
 
-    gs_src = brew_prefix / "bin" / "gs"
-    share_src = brew_prefix / "share" / "ghostscript"
+    gs_candidates = []
+    if args.gs_bin:
+        gs_candidates.append(pathlib.Path(args.gs_bin))
+    if brew_prefix:
+        gs_candidates.extend([brew_prefix / "bin" / "gs", brew_prefix / "libexec" / "bin" / "gs"])
+    gs_on_path = shutil.which("gs")
+    if gs_on_path:
+        gs_candidates.append(pathlib.Path(gs_on_path))
 
-    if not gs_src.exists():
-        raise RuntimeError(f"Ghostscript binary missing at {gs_src}")
-    if not share_src.exists():
-        raise RuntimeError(f"Ghostscript share dir missing at {share_src}")
+    gs_src = pick_first_existing(gs_candidates)
+    if not gs_src:
+        raise RuntimeError(
+            "Ghostscript binary missing. Tried: "
+            + ", ".join(str(p) for p in gs_candidates if p is not None)
+        )
+    gs_real = gs_src.resolve()
+
+    share_candidates = []
+    if args.share_dir:
+        share_candidates.append(pathlib.Path(args.share_dir))
+    if brew_prefix:
+        share_candidates.append(brew_prefix / "share" / "ghostscript")
+    share_candidates.extend(
+        [
+            gs_real.parent.parent / "share" / "ghostscript",
+            gs_real.parent.parent.parent / "share" / "ghostscript",
+        ]
+    )
+    share_src = pick_first_existing(share_candidates)
+
+    if not share_src:
+        raise RuntimeError(
+            "Ghostscript share dir missing. Tried: "
+            + ", ".join(str(p) for p in share_candidates if p is not None)
+        )
+
+    if not brew_prefix or not brew_prefix.exists():
+        brew_prefix = gs_real.parent.parent
 
     if out_root.exists():
         shutil.rmtree(out_root)
@@ -138,6 +193,7 @@ def main():
     # Homebrew Ghostscript may contain self-referential versioned symlinks.
     # Preserve symlinks instead of dereferencing to avoid recursive copy loops.
     shutil.copytree(share_src, out_share / "ghostscript", symlinks=True)
+    prune_recursive_symlink_loops(out_share / "ghostscript")
 
     copy_recursive_closure(gs_bin, out_lib, brew_prefix)
     rewrite_install_names(gs_bin, out_lib)

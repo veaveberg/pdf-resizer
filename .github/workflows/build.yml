@@ -52,8 +52,10 @@ jobs:
         run: |
           brew install ghostscript
           GS_PREFIX="$(brew --prefix ghostscript)"
+          GS_BIN="$(command -v gs || true)"
           python3 scripts/prepare_macos_ghostscript_runtime.py \
             --brew-prefix "$GS_PREFIX" \
+            --gs-bin "$GS_BIN" \
             --output-root src-tauri/bin/ghostscript
 
       - name: Prepare Ghostscript runtime and NSIS tools (Windows)
@@ -103,12 +105,13 @@ jobs:
 
           Remove-Item -Recurse -Force $payloadDir -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path $payloadDir | Out-Null
+          New-Item -ItemType Directory -Force -Path "$payloadDir/bin" | Out-Null
           New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
 
           Copy-Item "$releaseDir/PDF Resizer.exe" "$payloadDir/PDF Resizer.exe" -Force
-          Copy-Item "src-tauri/bin/ghostscript-win" "$payloadDir/ghostscript-win" -Recurse -Force
+          Copy-Item "src-tauri/bin/ghostscript-win" "$payloadDir/bin/ghostscript-win" -Recurse -Force
 
-          $gsExe = Get-ChildItem "$payloadDir/ghostscript-win/bin/gswin64c.exe" -File | Select-Object -First 1
+          $gsExe = Get-ChildItem "$payloadDir/bin/ghostscript-win/bin/gswin64c.exe" -File | Select-Object -First 1
           if (-not $gsExe) { throw "Staged Ghostscript binary not found." }
           python scripts/ghostscript_smoke.py --gs "$($gsExe.FullName)"
 
@@ -145,8 +148,14 @@ jobs:
             $resolvedInstallDir = "${env:ProgramFiles(x86)}\\PDF Resizer"
           }
 
-          $installedGs = "$resolvedInstallDir\\ghostscript-win\\bin\\gswin64c.exe"
-          if (!(Test-Path $installedGs)) { throw "Installed Ghostscript binary not found at $installedGs" }
+          $installedCandidates = @(
+            "$resolvedInstallDir\\bin\\ghostscript-win\\bin\\gswin64c.exe",
+            "$resolvedInstallDir\\ghostscript-win\\bin\\gswin64c.exe"
+          )
+          $installedGs = $installedCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $installedGs) {
+            throw "Installed Ghostscript binary not found. Tried: $($installedCandidates -join ', ')"
+          }
           python scripts/ghostscript_smoke.py --gs "$installedGs"
 
           $uninstaller = "$resolvedInstallDir\\Uninstall PDF Resizer.exe"

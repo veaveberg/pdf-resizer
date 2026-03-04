@@ -14,14 +14,8 @@ struct PendingOpenPaths(Mutex<Vec<String>>);
 
 #[derive(Clone, Default)]
 struct GhostscriptRuntime {
-    #[cfg(target_os = "macos")]
-    mac_root: Option<PathBuf>,
-    #[cfg(target_os = "windows")]
-    windows_root: Option<PathBuf>,
-    #[cfg(target_os = "macos")]
-    dev_mac_root: Option<PathBuf>,
-    #[cfg(target_os = "windows")]
-    dev_windows_root: Option<PathBuf>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    roots: Vec<PathBuf>,
 }
 
 #[derive(Clone, Default)]
@@ -51,8 +45,8 @@ impl GhostscriptRuntime {
         #[cfg(target_os = "macos")]
         {
             return self
-                .mac_root
-                .as_ref()
+                .roots
+                .first()
                 .map(|p| p.to_string_lossy().to_string());
         }
         #[cfg(not(target_os = "macos"))]
@@ -65,8 +59,8 @@ impl GhostscriptRuntime {
         #[cfg(target_os = "windows")]
         {
             return self
-                .windows_root
-                .as_ref()
+                .roots
+                .first()
                 .map(|p| p.to_string_lossy().to_string());
         }
         #[cfg(not(target_os = "windows"))]
@@ -190,33 +184,29 @@ fn collect_candidates(runtime: &GhostscriptRuntime) -> Vec<GhostscriptCandidate>
 
     #[cfg(target_os = "macos")]
     {
-        for root in [&runtime.mac_root, &runtime.dev_mac_root] {
-            if let Some(root) = root {
-                candidates.push(GhostscriptCandidate {
-                    command: root.join("bin").join("gs"),
-                    gs_root: Some(root.clone()),
-                });
-                candidates.push(GhostscriptCandidate {
-                    command: root.join("gs"),
-                    gs_root: Some(root.clone()),
-                });
-            }
+        for root in &runtime.roots {
+            candidates.push(GhostscriptCandidate {
+                command: root.join("bin").join("gs"),
+                gs_root: Some(root.clone()),
+            });
+            candidates.push(GhostscriptCandidate {
+                command: root.join("gs"),
+                gs_root: Some(root.clone()),
+            });
         }
     }
 
     #[cfg(target_os = "windows")]
     {
-        for root in [&runtime.windows_root, &runtime.dev_windows_root] {
-            if let Some(root) = root {
-                candidates.push(GhostscriptCandidate {
-                    command: root.join("bin").join("gswin64c.exe"),
-                    gs_root: Some(root.clone()),
-                });
-                candidates.push(GhostscriptCandidate {
-                    command: root.join("bin").join("gswin32c.exe"),
-                    gs_root: Some(root.clone()),
-                });
-            }
+        for root in &runtime.roots {
+            candidates.push(GhostscriptCandidate {
+                command: root.join("bin").join("gswin64c.exe"),
+                gs_root: Some(root.clone()),
+            });
+            candidates.push(GhostscriptCandidate {
+                command: root.join("bin").join("gswin32c.exe"),
+                gs_root: Some(root.clone()),
+            });
         }
     }
 
@@ -379,34 +369,62 @@ fn collect_startup_file_paths() -> Vec<String> {
         .collect()
 }
 
+fn push_root_if_exists(roots: &mut Vec<PathBuf>, root: PathBuf) {
+    if root.exists() && root.is_dir() && !roots.iter().any(|existing| existing == &root) {
+        roots.push(root);
+    }
+}
+
 fn resolve_ghostscript_runtime(app: &tauri::App) -> GhostscriptRuntime {
     let resource_dir = app.path_resolver().resource_dir();
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.to_path_buf()));
 
     let mut runtime = GhostscriptRuntime::default();
 
     #[cfg(target_os = "macos")]
     {
-        runtime.dev_mac_root = {
-            let p = manifest_dir.join("bin").join("ghostscript");
-            if p.exists() { Some(p) } else { None }
-        };
-        runtime.mac_root = resource_dir.as_ref().and_then(|base| {
-            let p = base.join("bin").join("ghostscript");
-            if p.exists() { Some(p) } else { None }
-        });
+        let mut roots = Vec::new();
+        if let Some(base) = resource_dir.as_ref() {
+            push_root_if_exists(&mut roots, base.join("bin").join("ghostscript"));
+        }
+        if let Some(base) = exe_dir.as_ref() {
+            if let Some(contents_dir) = base.parent() {
+                if let Some(app_dir) = contents_dir.parent() {
+                    push_root_if_exists(
+                        &mut roots,
+                        app_dir.join("Resources").join("bin").join("ghostscript"),
+                    );
+                }
+            }
+        }
+        push_root_if_exists(&mut roots, manifest_dir.join("bin").join("ghostscript"));
+        runtime.roots = roots;
     }
 
     #[cfg(target_os = "windows")]
     {
-        runtime.dev_windows_root = {
-            let p = manifest_dir.join("bin").join("ghostscript-win");
-            if p.exists() { Some(p) } else { None }
-        };
-        runtime.windows_root = resource_dir.as_ref().and_then(|base| {
-            let p = base.join("bin").join("ghostscript-win");
-            if p.exists() { Some(p) } else { None }
-        });
+        let mut roots = Vec::new();
+        if let Some(base) = resource_dir.as_ref() {
+            push_root_if_exists(&mut roots, base.join("bin").join("ghostscript-win"));
+            push_root_if_exists(&mut roots, base.join("ghostscript-win"));
+            push_root_if_exists(
+                &mut roots,
+                base.join("resources").join("bin").join("ghostscript-win"),
+            );
+        }
+        if let Some(base) = exe_dir.as_ref() {
+            push_root_if_exists(&mut roots, base.join("bin").join("ghostscript-win"));
+            push_root_if_exists(&mut roots, base.join("ghostscript-win"));
+            push_root_if_exists(
+                &mut roots,
+                base.join("resources").join("bin").join("ghostscript-win"),
+            );
+        }
+        push_root_if_exists(&mut roots, manifest_dir.join("bin").join("ghostscript-win"));
+        runtime.roots = roots;
     }
 
     runtime
