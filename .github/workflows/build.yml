@@ -133,12 +133,23 @@ jobs:
           $installDir = "$env:TEMP\\pdfresizer-smoke-install"
           Remove-Item -Recurse -Force $installDir -ErrorAction SilentlyContinue
           & $outputFile /S "/D=$installDir"
+          if ($LASTEXITCODE -ne 0) { throw "NSIS installer exited with code $LASTEXITCODE" }
 
-          $installedGs = "$installDir\\ghostscript-win\\bin\\gswin64c.exe"
+          $resolvedInstallDir = $installDir
+          $regInstallDir = (Get-ItemProperty -Path "HKLM:\\Software\\PDF Resizer" -Name InstallDir -ErrorAction SilentlyContinue).InstallDir
+          if ($regInstallDir) {
+            $resolvedInstallDir = $regInstallDir
+          } elseif (Test-Path "$env:ProgramFiles\\PDF Resizer") {
+            $resolvedInstallDir = "$env:ProgramFiles\\PDF Resizer"
+          } elseif (Test-Path "${env:ProgramFiles(x86)}\\PDF Resizer") {
+            $resolvedInstallDir = "${env:ProgramFiles(x86)}\\PDF Resizer"
+          }
+
+          $installedGs = "$resolvedInstallDir\\ghostscript-win\\bin\\gswin64c.exe"
           if (!(Test-Path $installedGs)) { throw "Installed Ghostscript binary not found at $installedGs" }
           python scripts/ghostscript_smoke.py --gs "$installedGs"
 
-          $uninstaller = "$installDir\\Uninstall PDF Resizer.exe"
+          $uninstaller = "$resolvedInstallDir\\Uninstall PDF Resizer.exe"
           if (Test-Path $uninstaller) {
             & $uninstaller /S
           }
