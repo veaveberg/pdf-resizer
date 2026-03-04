@@ -6,7 +6,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use tauri::api::process::Command as SidecarCommand;
 use tauri::{Manager, State};
 
 #[derive(Default)]
@@ -38,6 +37,12 @@ struct GhostscriptProbeResult {
 struct GhostscriptCandidate {
     command: PathBuf,
     gs_root: Option<PathBuf>,
+}
+
+struct GhostscriptExecOutput {
+    status: std::process::ExitStatus,
+    stdout: String,
+    stderr: String,
 }
 
 impl GhostscriptRuntime {
@@ -128,7 +133,11 @@ fn collect_gs_lib_entries(gs_root: &Path) -> Option<String> {
     if entries.is_empty() {
         None
     } else {
-        Some(entries.join(":"))
+        #[cfg(target_os = "windows")]
+        let separator = ";";
+        #[cfg(not(target_os = "windows"))]
+        let separator = ":";
+        Some(entries.join(separator))
     }
 }
 
@@ -140,29 +149,37 @@ fn run_candidate(
     candidate: &GhostscriptCandidate,
     args: &[&str],
     log: &mut GhostscriptProbeLog,
-) -> Result<tauri::api::process::Output, String> {
+) -> Result<GhostscriptExecOutput, String> {
     record_attempt(log, &candidate.command);
 
-    let mut cmd = SidecarCommand::new(candidate.command.to_string_lossy().to_string()).args(args);
+    let mut cmd = std::process::Command::new(&candidate.command);
+    cmd.args(args);
     if let Some(gs_root) = candidate.gs_root.as_deref() {
         if let Some(gs_lib) = collect_gs_lib_entries(gs_root) {
             let mut envs = HashMap::new();
-            envs.insert("GS_LIB".to_string(), gs_lib);
-            cmd = cmd.envs(envs);
+            envs.insert("GS_LIB", gs_lib);
+            cmd.envs(envs);
         }
     }
 
     match cmd.output() {
         Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             log.selected = Some(candidate.command.to_string_lossy().to_string());
-            Ok(output)
+            Ok(GhostscriptExecOutput {
+                status: output.status,
+                stdout,
+                stderr,
+            })
         }
         Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             let error = format!(
                 "Ghostscript command '{}' failed with status {:?}: {}",
                 candidate.command.display(),
                 output.status,
-                output.stderr
+                stderr
             );
             log.last_error = Some(error.clone());
             Err(error)
@@ -217,7 +234,7 @@ fn run_ghostscript(
     args: &[&str],
     runtime: &GhostscriptRuntime,
     probe: Option<&mut GhostscriptProbeLog>,
-) -> Result<tauri::api::process::Output, String> {
+) -> Result<GhostscriptExecOutput, String> {
     let mut log = GhostscriptProbeLog::default();
 
     for candidate in collect_candidates(runtime) {
