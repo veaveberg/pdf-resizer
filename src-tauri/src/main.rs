@@ -3,14 +3,78 @@
     windows_subsystem = "windows"
 )]
 
-use std::path::Path;
-use std::sync::Mutex;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use tauri::api::process::Command as SidecarCommand;
 use tauri::{Manager, State};
 
 #[derive(Default)]
 struct PendingOpenPaths(Mutex<Vec<String>>);
+
+#[derive(Clone, Default)]
+struct GhostscriptRuntime {
+    #[cfg(target_os = "macos")]
+    mac_root: Option<PathBuf>,
+    #[cfg(target_os = "windows")]
+    windows_root: Option<PathBuf>,
+    #[cfg(target_os = "macos")]
+    dev_mac_root: Option<PathBuf>,
+    #[cfg(target_os = "windows")]
+    dev_windows_root: Option<PathBuf>,
+}
+
+#[derive(Clone, Default)]
+struct GhostscriptProbeLog {
+    attempted: Vec<String>,
+    selected: Option<String>,
+    last_error: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct GhostscriptProbeResult {
+    attempted: Vec<String>,
+    selected: Option<String>,
+    last_error: Option<String>,
+    mac_root: Option<String>,
+    windows_root: Option<String>,
+}
+
+#[derive(Clone)]
+struct GhostscriptCandidate {
+    command: PathBuf,
+    gs_root: Option<PathBuf>,
+}
+
+impl GhostscriptRuntime {
+    fn mac_root_string(&self) -> Option<String> {
+        #[cfg(target_os = "macos")]
+        {
+            return self
+                .mac_root
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string());
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            None
+        }
+    }
+
+    fn windows_root_string(&self) -> Option<String> {
+        #[cfg(target_os = "windows")]
+        {
+            return self
+                .windows_root
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string());
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            None
+        }
+    }
+}
 
 #[tauri::command]
 fn check_file_existence(file_paths: Vec<String>) -> Vec<bool> {
@@ -45,171 +109,171 @@ const GHOSTSCRIPT_FALLBACK_COMMANDS: [&str; 3] = ["gs", "/opt/homebrew/bin/gs", 
 #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
 const GHOSTSCRIPT_FALLBACK_COMMANDS: [&str; 1] = ["gs"];
 
-fn run_ghostscript(args: &[&str]) -> Result<tauri::api::process::Output, String> {
+fn collect_gs_lib_entries(gs_root: &Path) -> Option<String> {
+    let share_ghostscript = gs_root.join("share").join("ghostscript");
+    if !share_ghostscript.exists() {
+        return None;
+    }
+    let mut entries = Vec::new();
+    if let Ok(dirs) = std::fs::read_dir(&share_ghostscript) {
+        for entry in dirs.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let lib_path = path.join("lib");
+            let resource_path = path.join("Resource");
+            if lib_path.exists() {
+                entries.push(lib_path.to_string_lossy().to_string());
+            }
+            if resource_path.exists() {
+                entries.push(resource_path.to_string_lossy().to_string());
+            }
+        }
+    }
+    if entries.is_empty() {
+        None
+    } else {
+        Some(entries.join(":"))
+    }
+}
+
+fn record_attempt(log: &mut GhostscriptProbeLog, command: &Path) {
+    log.attempted.push(command.to_string_lossy().to_string());
+}
+
+fn run_candidate(
+    candidate: &GhostscriptCandidate,
+    args: &[&str],
+    log: &mut GhostscriptProbeLog,
+) -> Result<tauri::api::process::Output, String> {
+    record_attempt(log, &candidate.command);
+
+    let mut cmd = SidecarCommand::new(candidate.command.to_string_lossy().to_string()).args(args);
+    if let Some(gs_root) = candidate.gs_root.as_deref() {
+        if let Some(gs_lib) = collect_gs_lib_entries(gs_root) {
+            let mut envs = HashMap::new();
+            envs.insert("GS_LIB".to_string(), gs_lib);
+            cmd = cmd.envs(envs);
+        }
+    }
+
+    match cmd.output() {
+        Ok(output) if output.status.success() => {
+            log.selected = Some(candidate.command.to_string_lossy().to_string());
+            Ok(output)
+        }
+        Ok(output) => {
+            let error = format!(
+                "Ghostscript command '{}' failed with status {:?}: {}",
+                candidate.command.display(),
+                output.status,
+                output.stderr
+            );
+            log.last_error = Some(error.clone());
+            Err(error)
+        }
+        Err(e) => {
+            let error = format!(
+                "Failed to execute Ghostscript command '{}': {}",
+                candidate.command.display(),
+                e
+            );
+            log.last_error = Some(error.clone());
+            Err(error)
+        }
+    }
+}
+
+fn collect_candidates(runtime: &GhostscriptRuntime) -> Vec<GhostscriptCandidate> {
+    let mut candidates = Vec::new();
+
     #[cfg(target_os = "macos")]
     {
-        if let Ok(exe_path) = std::env::current_exe() {
-            if let Some(exe_dir) = exe_path.parent() {
-                let resource_dir = exe_dir.join("../Resources");
-                let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-                #[allow(unused_mut)]
-                let mut local_candidates = vec![
-                    manifest_dir.join("bin").join("ghostscript").join("bin").join("gs"),
-                    resource_dir.join("bin").join("ghostscript").join("bin").join("gs"),
-                    resource_dir.join("ghostscript").join("bin").join("gs"),
-                    resource_dir.join("bin").join("gs"),
-                    resource_dir.join("gs"),
-                    resource_dir.join("bin").join("gs-aarch64-apple-darwin"),
-                    resource_dir.join("gs-aarch64-apple-darwin"),
-                    resource_dir.join("bin").join("gs-x86_64-apple-darwin"),
-                    resource_dir.join("gs-x86_64-apple-darwin"),
-                    resource_dir.join("bin").join("gs-universal-apple-darwin"),
-                    resource_dir.join("gs-universal-apple-darwin"),
-                ];
-
-                // In packaged builds, Tauri may place sidecars next to the executable.
-                #[cfg(not(debug_assertions))]
-                {
-                    local_candidates.push(exe_dir.join("gs"));
-                    local_candidates.push(exe_dir.join("gs-aarch64-apple-darwin"));
-                    local_candidates.push(exe_dir.join("gs-x86_64-apple-darwin"));
-                    local_candidates.push(exe_dir.join("gs-universal-apple-darwin"));
-                }
-
-                for candidate in local_candidates {
-                    if candidate.exists() {
-                        let mut cmd = SidecarCommand::new(candidate.to_string_lossy().to_string());
-                        cmd = cmd.args(args);
-
-                        if let Some(gs_root) = candidate.parent().and_then(|p| p.parent()) {
-                            let share_ghostscript = gs_root.join("share").join("ghostscript");
-                            if share_ghostscript.exists() {
-                                let mut gs_lib_entries = Vec::new();
-                                if let Ok(entries) = std::fs::read_dir(&share_ghostscript) {
-                                    for entry in entries.flatten() {
-                                        let path = entry.path();
-                                        if path.is_dir() {
-                                            let lib_path = path.join("lib");
-                                            let resource_path = path.join("Resource");
-                                            if lib_path.exists() {
-                                                gs_lib_entries.push(lib_path.to_string_lossy().to_string());
-                                            }
-                                            if resource_path.exists() {
-                                                gs_lib_entries.push(resource_path.to_string_lossy().to_string());
-                                            }
-                                        }
-                                    }
-                                }
-                                if !gs_lib_entries.is_empty() {
-                                    let mut envs = HashMap::new();
-                                    envs.insert("GS_LIB".to_string(), gs_lib_entries.join(":"));
-                                    cmd = cmd.envs(envs);
-                                }
-                            }
-                        }
-
-                        match cmd.output() {
-                            Ok(output) if output.status.success() => return Ok(output),
-                            Ok(output) => {
-                                println!(
-                                    "App-local macOS Ghostscript failed with status {:?}: {}",
-                                    output.status, output.stderr
-                                );
-                            }
-                            Err(e) => {
-                                println!("Failed to execute app-local macOS Ghostscript: {}", e);
-                            }
-                        }
-                    }
-                }
+        for root in [&runtime.mac_root, &runtime.dev_mac_root] {
+            if let Some(root) = root {
+                candidates.push(GhostscriptCandidate {
+                    command: root.join("bin").join("gs"),
+                    gs_root: Some(root.clone()),
+                });
+                candidates.push(GhostscriptCandidate {
+                    command: root.join("gs"),
+                    gs_root: Some(root.clone()),
+                });
             }
         }
     }
 
     #[cfg(target_os = "windows")]
     {
-        // First try app-local Ghostscript binaries from the Windows release package.
-        if let Ok(exe_path) = std::env::current_exe() {
-            if let Some(exe_dir) = exe_path.parent() {
-                let resources_dir = exe_dir.join("resources");
-                let local_candidates = [
-                    exe_dir.join("gs.exe"),
-                    exe_dir.join("ghostscript").join("bin").join("gswin64c.exe"),
-                    exe_dir.join("ghostscript").join("bin").join("gswin32c.exe"),
-                    resources_dir.join("bin").join("ghostscript-win").join("bin").join("gswin64c.exe"),
-                    resources_dir.join("bin").join("ghostscript-win").join("bin").join("gswin32c.exe"),
-                    resources_dir.join("ghostscript-win").join("bin").join("gswin64c.exe"),
-                    resources_dir.join("ghostscript-win").join("bin").join("gswin32c.exe"),
-                ];
-                for candidate in local_candidates {
-                    if candidate.exists() {
-                        match SidecarCommand::new(candidate.to_string_lossy().to_string())
-                            .args(args)
-                            .output()
-                        {
-                            Ok(output) if output.status.success() => return Ok(output),
-                            Ok(output) => {
-                                println!(
-                                    "App-local Ghostscript failed with status {:?}: {}",
-                                    output.status, output.stderr
-                                );
-                            }
-                            Err(e) => {
-                                println!("Failed to execute app-local Ghostscript: {}", e);
-                            }
-                        }
-                    }
-                }
+        for root in [&runtime.windows_root, &runtime.dev_windows_root] {
+            if let Some(root) = root {
+                candidates.push(GhostscriptCandidate {
+                    command: root.join("bin").join("gswin64c.exe"),
+                    gs_root: Some(root.clone()),
+                });
+                candidates.push(GhostscriptCandidate {
+                    command: root.join("bin").join("gswin32c.exe"),
+                    gs_root: Some(root.clone()),
+                });
             }
         }
     }
 
-    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-    {
-        // On non-Windows builds, try the bundled sidecar first.
-        if let Ok(cmd) = SidecarCommand::new_sidecar("gs") {
-            match cmd.args(args).output() {
-                Ok(output) if output.status.success() => return Ok(output),
-                Ok(output) => {
-                    println!(
-                        "Ghostscript sidecar failed with status {:?}: {}",
-                        output.status, output.stderr
-                    );
-                }
-                Err(e) => {
-                    println!("Failed to execute Ghostscript sidecar: {}", e);
-                }
+    candidates
+}
+
+fn run_ghostscript(
+    args: &[&str],
+    runtime: &GhostscriptRuntime,
+    probe: Option<&mut GhostscriptProbeLog>,
+) -> Result<tauri::api::process::Output, String> {
+    let mut log = GhostscriptProbeLog::default();
+
+    for candidate in collect_candidates(runtime) {
+        if !candidate.command.exists() {
+            continue;
+        }
+        if let Ok(output) = run_candidate(&candidate, args, &mut log) {
+            if let Some(probe_log) = probe {
+                *probe_log = log;
             }
+            return Ok(output);
         }
     }
 
     // Last fallback to system Ghostscript on PATH.
-    let mut last_error = String::from("Ghostscript is not available.");
     for command in GHOSTSCRIPT_FALLBACK_COMMANDS {
-        if command.starts_with('/') && !std::path::Path::new(command).exists() {
+        let command_path = PathBuf::from(command);
+        if command.starts_with('/') && !command_path.exists() {
             continue;
         }
-        match SidecarCommand::new(command).args(args).output() {
-            Ok(output) if output.status.success() => return Ok(output),
-            Ok(output) => {
-                last_error = format!(
-                    "Ghostscript command '{}' failed with status {:?}: {}",
-                    command, output.status, output.stderr
-                );
+        let candidate = GhostscriptCandidate {
+            command: command_path,
+            gs_root: None,
+        };
+        if let Ok(output) = run_candidate(&candidate, args, &mut log) {
+            if let Some(probe_log) = probe {
+                *probe_log = log;
             }
-            Err(e) => {
-                last_error = format!("Failed to execute Ghostscript command '{}': {}", command, e);
-            }
+            return Ok(output);
         }
     }
 
-    Err(last_error)
+    let error = log
+        .last_error
+        .clone()
+        .unwrap_or_else(|| String::from("Ghostscript is not available."));
+    if let Some(probe_log) = probe {
+        *probe_log = log;
+    }
+    Err(error)
 }
 
 /// Check if Ghostscript is available (bundled or on PATH).
 #[tauri::command]
-fn check_ghostscript() -> String {
-    match run_ghostscript(&["--version"]) {
+fn check_ghostscript(runtime: State<'_, GhostscriptRuntime>) -> String {
+    match run_ghostscript(&["--version"], &runtime, None) {
         Ok(output) => output.stdout.trim().to_string(),
         Err(e) => {
             // Missing Ghostscript is an expected state in dev; keep logs quiet for ENOENT-like cases.
@@ -225,9 +289,38 @@ fn check_ghostscript() -> String {
     }
 }
 
+#[tauri::command]
+fn debug_ghostscript_probe(runtime: State<'_, GhostscriptRuntime>) -> GhostscriptProbeResult {
+    if !cfg!(debug_assertions) {
+        return GhostscriptProbeResult {
+            attempted: Vec::new(),
+            selected: None,
+            last_error: Some(String::from("debug_ghostscript_probe is disabled in production builds.")),
+            mac_root: runtime.mac_root_string(),
+            windows_root: runtime.windows_root_string(),
+        };
+    }
+
+    let mut probe = GhostscriptProbeLog::default();
+    let result = run_ghostscript(&["--version"], &runtime, Some(&mut probe));
+    if let Err(error) = result {
+        if probe.last_error.is_none() {
+            probe.last_error = Some(error);
+        }
+    }
+
+    GhostscriptProbeResult {
+        attempted: probe.attempted,
+        selected: probe.selected,
+        last_error: probe.last_error,
+        mac_root: runtime.mac_root_string(),
+        windows_root: runtime.windows_root_string(),
+    }
+}
+
 /// Flatten a PDF using Ghostscript (bundled sidecar preferred).
 #[tauri::command]
-fn flatten_pdf(pdf_bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+fn flatten_pdf(pdf_bytes: Vec<u8>, runtime: State<'_, GhostscriptRuntime>) -> Result<Vec<u8>, String> {
     use std::io::Write;
 
     let tmp_dir = std::env::temp_dir();
@@ -252,7 +345,7 @@ fn flatten_pdf(pdf_bytes: Vec<u8>) -> Result<Vec<u8>, String> {
         output_file_arg.as_str(),
         input_file_arg.as_str(),
     ];
-    let result = run_ghostscript(&args)?;
+    let result = run_ghostscript(&args, &runtime, None)?;
 
     if !result.status.success() {
         let stderr = result.stderr;
@@ -286,10 +379,45 @@ fn collect_startup_file_paths() -> Vec<String> {
         .collect()
 }
 
+fn resolve_ghostscript_runtime(app: &tauri::App) -> GhostscriptRuntime {
+    let resource_dir = app.path_resolver().resource_dir();
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    let mut runtime = GhostscriptRuntime::default();
+
+    #[cfg(target_os = "macos")]
+    {
+        runtime.dev_mac_root = {
+            let p = manifest_dir.join("bin").join("ghostscript");
+            if p.exists() { Some(p) } else { None }
+        };
+        runtime.mac_root = resource_dir.as_ref().and_then(|base| {
+            let p = base.join("bin").join("ghostscript");
+            if p.exists() { Some(p) } else { None }
+        });
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        runtime.dev_windows_root = {
+            let p = manifest_dir.join("bin").join("ghostscript-win");
+            if p.exists() { Some(p) } else { None }
+        };
+        runtime.windows_root = resource_dir.as_ref().and_then(|base| {
+            let p = base.join("bin").join("ghostscript-win");
+            if p.exists() { Some(p) } else { None }
+        });
+    }
+
+    runtime
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(PendingOpenPaths::default())
         .setup(|app| {
+            let gs_runtime = resolve_ghostscript_runtime(app);
+            app.manage(gs_runtime);
             let startup_paths = collect_startup_file_paths();
             if !startup_paths.is_empty() {
                 if let Some(main_window) = app.get_window("main") {
@@ -306,6 +434,7 @@ fn main() {
             check_file_existence,
             log_path,
             check_ghostscript,
+            debug_ghostscript_probe,
             flatten_pdf,
             take_pending_open_paths
         ])

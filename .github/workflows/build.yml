@@ -25,7 +25,7 @@ jobs:
             args: --target universal-apple-darwin --bundles dmg
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
-            args: --target x86_64-pc-windows-msvc --bundles msi
+            args: --target x86_64-pc-windows-msvc --bundles none
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -52,64 +52,15 @@ jobs:
         run: |
           brew install ghostscript
           GS_PREFIX="$(brew --prefix ghostscript)"
-          GS_ROOT="src-tauri/bin/ghostscript"
-          GS_BIN_DIR="$GS_ROOT/bin"
-          GS_LIB_DIR="$GS_ROOT/lib"
-          GS_SHARE_DIR="$GS_ROOT/share"
+          python3 scripts/prepare_macos_ghostscript_runtime.py \
+            --brew-prefix "$GS_PREFIX" \
+            --output-root src-tauri/bin/ghostscript
 
-          rm -rf "$GS_ROOT"
-          mkdir -p "$GS_BIN_DIR" "$GS_LIB_DIR" "$GS_SHARE_DIR"
-
-          cp "$GS_PREFIX/bin/gs" "$GS_BIN_DIR/gs"
-          cp -R "$GS_PREFIX/share/ghostscript" "$GS_SHARE_DIR/"
-
-          python3 - <<'PY'
-          import subprocess, shutil, pathlib
-
-          GS_BIN = pathlib.Path("src-tauri/bin/ghostscript/bin/gs").resolve()
-          LIB_DIR = GS_BIN.parent.parent / "lib"
-          LIB_DIR.mkdir(parents=True, exist_ok=True)
-
-          def deps(path: pathlib.Path):
-              out = subprocess.check_output(["otool", "-L", str(path)], text=True)
-              for line in out.splitlines()[1:]:
-                  lib = line.strip().split(" ")[0]
-                  if lib.startswith(("/opt/homebrew", "/usr/local")):
-                      yield pathlib.Path(lib)
-
-          visited = set()
-          queue = [GS_BIN]
-          while queue:
-              item = queue.pop()
-              if item in visited:
-                  continue
-              visited.add(item)
-              for dep in deps(item):
-                  target = LIB_DIR / dep.name
-                  if not target.exists():
-                      shutil.copy2(dep, target)
-                      queue.append(target)
-
-          # Rewrite ids and inter-lib links to use @loader_path
-          for lib in LIB_DIR.glob("*.dylib"):
-              subprocess.run(["install_name_tool", "-id", f"@loader_path/{lib.name}", str(lib)], check=False)
-              for dep in deps(lib):
-                  dep_base = dep.name
-                  if (LIB_DIR / dep_base).exists():
-                      subprocess.run(["install_name_tool", "-change", str(dep), f"@loader_path/{dep_base}", str(lib)], check=False)
-
-          # Point gs to bundled libs
-          for dep in deps(GS_BIN):
-              dep_base = dep.name
-              if (LIB_DIR / dep_base).exists():
-                  subprocess.run(["install_name_tool", "-change", str(dep), f"@executable_path/../lib/{dep_base}", str(GS_BIN)], check=False)
-          PY
-
-      - name: Install Ghostscript (Windows)
+      - name: Prepare Ghostscript runtime and NSIS tools (Windows)
         if: matrix.platform == 'windows-latest'
         shell: pwsh
         run: |
-          choco install ghostscript -y
+          choco install ghostscript nsis -y
           New-Item -ItemType Directory -Force -Path src-tauri/bin | Out-Null
           Remove-Item -Recurse -Force src-tauri/bin/ghostscript-win -ErrorAction SilentlyContinue
           $gsRoot = Get-ChildItem "C:\Program Files\gs\gs*" -Directory | Sort-Object Name -Descending | Select-Object -First 1
@@ -122,6 +73,61 @@ jobs:
       - name: Build Tauri bundles
         run: npm run tauri build -- ${{ matrix.args }}
 
+      - name: Smoke test bundled Ghostscript (macOS)
+        if: matrix.platform == 'macos-latest'
+        run: |
+          APP_PATH=$(find "src-tauri/target/${{ matrix.target }}/release/bundle" -name "*.app" -type d | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "macOS app bundle not found"
+            exit 1
+          fi
+          GS_BIN="$APP_PATH/Contents/Resources/bin/ghostscript/bin/gs"
+          if [ ! -x "$GS_BIN" ]; then
+            echo "Bundled Ghostscript binary not found at: $GS_BIN"
+            find "$APP_PATH/Contents/Resources" -maxdepth 5 -type f | sort || true
+            exit 1
+          fi
+          python3 scripts/ghostscript_smoke.py --gs "$GS_BIN"
+
+      - name: Build and smoke test NSIS installer (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $releaseDir = "src-tauri/target/${{ matrix.target }}/release"
+          $payloadDir = "$releaseDir/nsis-payload"
+          $artifactDir = "artifacts"
+
+          Remove-Item -Recurse -Force $payloadDir -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $payloadDir | Out-Null
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+
+          Copy-Item "$releaseDir/PDF Resizer.exe" "$payloadDir/PDF Resizer.exe" -Force
+          Copy-Item "src-tauri/bin/ghostscript-win" "$payloadDir/ghostscript-win" -Recurse -Force
+
+          $gsExe = Get-ChildItem "$payloadDir/ghostscript-win/bin/gswin64c.exe" -File | Select-Object -First 1
+          if (-not $gsExe) { throw "Staged Ghostscript binary not found." }
+          python scripts/ghostscript_smoke.py --gs "$($gsExe.FullName)"
+
+          $version = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).package.version
+          $outputFile = (Resolve-Path $artifactDir).Path + "\\PDF-Resizer-Windows.exe"
+          $payloadAbs = (Resolve-Path $payloadDir).Path
+
+          & makensis "/DAPP_VERSION=$version" "/DOUTPUT_FILE=$outputFile" "/DPAYLOAD_DIR=$payloadAbs" "src-tauri\\nsis\\installer.nsi"
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed with exit code $LASTEXITCODE" }
+
+          $installDir = "$env:TEMP\\pdfresizer-smoke-install"
+          Remove-Item -Recurse -Force $installDir -ErrorAction SilentlyContinue
+          & $outputFile /S "/D=$installDir"
+
+          $installedGs = "$installDir\\ghostscript-win\\bin\\gswin64c.exe"
+          if (!(Test-Path $installedGs)) { throw "Installed Ghostscript binary not found at $installedGs" }
+          python scripts/ghostscript_smoke.py --gs "$installedGs"
+
+          $uninstaller = "$installDir\\Uninstall PDF Resizer.exe"
+          if (Test-Path $uninstaller) {
+            & $uninstaller /S
+          }
+
       - name: Prepare DMG artifact (macOS)
         if: matrix.platform == 'macos-latest'
         run: |
@@ -132,16 +138,6 @@ jobs:
             exit 1
           fi
           cp "$DMG_PATH" "artifacts/PDF-Resizer-macOS.dmg"
-
-      - name: Prepare MSI artifact (Windows)
-        if: matrix.platform == 'windows-latest'
-        shell: pwsh
-        run: |
-          $artifactDir = "artifacts"
-          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
-          $msi = Get-ChildItem "src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi" | Select-Object -First 1
-          if (-not $msi) { throw "MSI artifact not found." }
-          Copy-Item $msi.FullName "$artifactDir/PDF-Resizer-Windows.msi" -Force
 
       - name: Upload macOS artifact
         if: matrix.platform == 'macos-latest'
@@ -157,7 +153,7 @@ jobs:
         with:
           name: PDF-Resizer-Windows
           if-no-files-found: error
-          path: "artifacts/PDF-Resizer-Windows.msi"
+          path: "artifacts/PDF-Resizer-Windows.exe"
 
   publish_release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -178,4 +174,4 @@ jobs:
         with:
           files: |
             artifacts/PDF-Resizer-macOS.dmg
-            artifacts/PDF-Resizer-Windows.msi
+            artifacts/PDF-Resizer-Windows.exe
