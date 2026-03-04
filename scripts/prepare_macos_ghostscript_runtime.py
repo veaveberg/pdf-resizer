@@ -101,7 +101,9 @@ def main():
 
     gs_bin = out_bin / "gs"
     shutil.copy2(gs_src, gs_bin)
-    shutil.copytree(share_src, out_share / "ghostscript")
+    # Homebrew Ghostscript may contain self-referential versioned symlinks.
+    # Preserve symlinks instead of dereferencing to avoid recursive copy loops.
+    shutil.copytree(share_src, out_share / "ghostscript", symlinks=True)
 
     copy_recursive_closure(gs_bin, out_lib)
     rewrite_install_names(gs_bin, out_lib)
