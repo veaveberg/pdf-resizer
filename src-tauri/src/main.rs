@@ -55,10 +55,15 @@ fn run_ghostscript(args: &[&str]) -> Result<tauri::api::process::Output, String>
                 #[allow(unused_mut)]
                 let mut local_candidates = vec![
                     manifest_dir.join("bin").join("ghostscript").join("bin").join("gs"),
+                    resource_dir.join("bin").join("ghostscript").join("bin").join("gs"),
                     resource_dir.join("ghostscript").join("bin").join("gs"),
+                    resource_dir.join("bin").join("gs"),
                     resource_dir.join("gs"),
+                    resource_dir.join("bin").join("gs-aarch64-apple-darwin"),
                     resource_dir.join("gs-aarch64-apple-darwin"),
+                    resource_dir.join("bin").join("gs-x86_64-apple-darwin"),
                     resource_dir.join("gs-x86_64-apple-darwin"),
+                    resource_dir.join("bin").join("gs-universal-apple-darwin"),
                     resource_dir.join("gs-universal-apple-darwin"),
                 ];
 
@@ -131,6 +136,8 @@ fn run_ghostscript(args: &[&str]) -> Result<tauri::api::process::Output, String>
                     exe_dir.join("gs.exe"),
                     exe_dir.join("ghostscript").join("bin").join("gswin64c.exe"),
                     exe_dir.join("ghostscript").join("bin").join("gswin32c.exe"),
+                    resources_dir.join("bin").join("ghostscript-win").join("bin").join("gswin64c.exe"),
+                    resources_dir.join("bin").join("ghostscript-win").join("bin").join("gswin32c.exe"),
                     resources_dir.join("ghostscript-win").join("bin").join("gswin64c.exe"),
                     resources_dir.join("ghostscript-win").join("bin").join("gswin32c.exe"),
                 ];
