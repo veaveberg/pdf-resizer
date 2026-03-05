@@ -72,6 +72,18 @@ jobs:
       - name: install frontend dependencies
         run: npm install
 
+      - name: Clean stale bundled Ghostscript outputs
+        if: matrix.platform == 'macos-latest'
+        run: |
+          rm -rf src-tauri/target/release/bin/ghostscript src-tauri/target/release/bin/ghostscript-win
+
+      - name: Clean stale bundled Ghostscript outputs (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force "src-tauri/target/release/bin/ghostscript" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "src-tauri/target/release/bin/ghostscript-win" -ErrorAction SilentlyContinue
+
       - name: Build Tauri bundles
         run: npm run tauri build -- ${{ matrix.args }}
 
@@ -93,7 +105,9 @@ jobs:
             find "$APP_PATH/Contents/Resources" -maxdepth 5 -type f | sort || true
             exit 1
           fi
-          python3 scripts/ghostscript_smoke.py --gs "$GS_BIN"
+          python3 scripts/ghostscript_smoke.py \
+            --gs "$GS_BIN" \
+            --gs-root "$APP_PATH/Contents/Resources/bin/ghostscript"
 
       - name: Build and smoke test NSIS installer (Windows)
         if: matrix.platform == 'windows-latest'
@@ -113,7 +127,7 @@ jobs:
 
           $gsExe = Get-ChildItem "$payloadDir/bin/ghostscript-win/bin/gswin64c.exe" -File | Select-Object -First 1
           if (-not $gsExe) { throw "Staged Ghostscript binary not found." }
-          python scripts/ghostscript_smoke.py --gs "$($gsExe.FullName)"
+          python scripts/ghostscript_smoke.py --gs "$($gsExe.FullName)" --gs-root "$payloadDir/bin/ghostscript-win"
 
           $version = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).package.version
           $outputFile = (Resolve-Path $artifactDir).Path + "\\PDF-Resizer-Windows.exe"
@@ -156,7 +170,15 @@ jobs:
           if (-not $installedGs) {
             throw "Installed Ghostscript binary not found. Tried: $($installedCandidates -join ', ')"
           }
-          python scripts/ghostscript_smoke.py --gs "$installedGs"
+          $installedGsRootCandidates = @(
+            "$resolvedInstallDir\\bin\\ghostscript-win",
+            "$resolvedInstallDir\\ghostscript-win"
+          )
+          $installedGsRoot = $installedGsRootCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $installedGsRoot) {
+            throw "Installed Ghostscript root not found. Tried: $($installedGsRootCandidates -join ', ')"
+          }
+          python scripts/ghostscript_smoke.py --gs "$installedGs" --gs-root "$installedGsRoot"
 
           $uninstaller = "$resolvedInstallDir\\Uninstall PDF Resizer.exe"
           if (Test-Path $uninstaller) {

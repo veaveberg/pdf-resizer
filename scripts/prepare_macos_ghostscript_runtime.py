@@ -3,6 +3,7 @@
 import argparse
 import pathlib
 import shutil
+import stat
 import subprocess
 import sys
 
@@ -107,6 +108,19 @@ def rewrite_install_names(gs_bin: pathlib.Path, lib_dir: pathlib.Path):
             )
 
 
+def make_writable(path: pathlib.Path):
+    mode = path.stat().st_mode
+    path.chmod(mode | stat.S_IWUSR)
+
+
+def ad_hoc_sign(gs_bin: pathlib.Path, lib_dir: pathlib.Path):
+    # install_name_tool invalidates Mach-O signatures on macOS; ad-hoc sign the closure.
+    sign_targets = [gs_bin] + sorted(lib_dir.glob("*.dylib"))
+    for target in sign_targets:
+        make_writable(target)
+        subprocess.run(["codesign", "--force", "--sign", "-", str(target)], check=True)
+
+
 def pick_first_existing(candidates):
     for candidate in candidates:
         if candidate and candidate.exists():
@@ -197,6 +211,7 @@ def main():
 
     copy_recursive_closure(gs_bin, out_lib, brew_prefix)
     rewrite_install_names(gs_bin, out_lib)
+    ad_hoc_sign(gs_bin, out_lib)
     print(f"Prepared Ghostscript runtime at {out_root}")
 
 

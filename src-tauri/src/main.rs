@@ -109,22 +109,40 @@ fn collect_gs_lib_entries(gs_root: &Path) -> Option<String> {
         return None;
     }
     let mut entries = Vec::new();
+    let mut push_if_exists = |path: PathBuf| {
+        if path.exists() {
+            entries.push(path);
+        }
+    };
+
+    // Newer Ghostscript distributions (e.g. Homebrew) flatten these directly under
+    // `share/ghostscript`, while some layouts place them in a versioned subdirectory.
+    push_if_exists(share_ghostscript.clone());
+    push_if_exists(share_ghostscript.join("lib"));
+    push_if_exists(share_ghostscript.join("Resource"));
+    push_if_exists(share_ghostscript.join("Resource").join("Init"));
+    push_if_exists(share_ghostscript.join("Resource").join("Font"));
+    push_if_exists(share_ghostscript.join("fonts"));
+    push_if_exists(share_ghostscript.join("iccprofiles"));
+
     if let Ok(dirs) = std::fs::read_dir(&share_ghostscript) {
         for entry in dirs.flatten() {
             let path = entry.path();
             if !path.is_dir() {
                 continue;
             }
-            let lib_path = path.join("lib");
-            let resource_path = path.join("Resource");
-            if lib_path.exists() {
-                entries.push(lib_path.to_string_lossy().to_string());
-            }
-            if resource_path.exists() {
-                entries.push(resource_path.to_string_lossy().to_string());
-            }
+            push_if_exists(path.join("lib"));
+            push_if_exists(path.join("Resource"));
+            push_if_exists(path.join("Resource").join("Init"));
+            push_if_exists(path.join("Resource").join("Font"));
+            push_if_exists(path.join("fonts"));
+            push_if_exists(path.join("iccprofiles"));
         }
     }
+
+    entries.sort();
+    entries.dedup();
+
     if entries.is_empty() {
         None
     } else {
@@ -132,8 +150,22 @@ fn collect_gs_lib_entries(gs_root: &Path) -> Option<String> {
         let separator = ";";
         #[cfg(not(target_os = "windows"))]
         let separator = ":";
-        Some(entries.join(separator))
+        Some(
+            entries
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect::<Vec<_>>()
+                .join(separator),
+        )
     }
+}
+
+fn collect_ghostscript_env(gs_root: &Path) -> HashMap<&'static str, String> {
+    let mut envs = HashMap::new();
+    if let Some(gs_lib) = collect_gs_lib_entries(gs_root) {
+        envs.insert("GS_LIB", gs_lib);
+    }
+    envs
 }
 
 fn record_attempt(log: &mut GhostscriptProbeLog, command: &Path) {
@@ -150,9 +182,8 @@ fn run_candidate(
     let mut cmd = std::process::Command::new(&candidate.command);
     cmd.args(args);
     if let Some(gs_root) = candidate.gs_root.as_deref() {
-        if let Some(gs_lib) = collect_gs_lib_entries(gs_root) {
-            let mut envs = HashMap::new();
-            envs.insert("GS_LIB", gs_lib);
+        let envs = collect_ghostscript_env(gs_root);
+        if !envs.is_empty() {
             cmd.envs(envs);
         }
     }
