@@ -58,22 +58,6 @@ jobs:
             --gs-bin "$GS_BIN" \
             --output-root src-tauri/bin/ghostscript
 
-      - name: Prepare PDFium runtime (macOS)
-        if: matrix.platform == 'macos-latest'
-        run: |
-          mkdir -p src-tauri/bin/pdfium-macos
-          PDFIUM_URL="$(python3 -c 'import json,urllib.request;data=json.load(urllib.request.urlopen(\"https://api.github.com/repos/bblanchon/pdfium-binaries/releases/latest\"));print(next((a.get(\"browser_download_url\",\"\") for a in data.get(\"assets\",[]) if a.get(\"name\")==\"pdfium-mac-univ.tgz\"),\"\"))')"
-          if [ -z "$PDFIUM_URL" ]; then
-            echo "Failed to resolve PDFium macOS asset URL"
-            exit 1
-          fi
-          curl -L "$PDFIUM_URL" -o /tmp/pdfium-mac-univ.tgz
-          rm -rf /tmp/pdfium-mac
-          mkdir -p /tmp/pdfium-mac
-          tar -xzf /tmp/pdfium-mac-univ.tgz -C /tmp/pdfium-mac
-          cp /tmp/pdfium-mac/lib/libpdfium.dylib src-tauri/bin/pdfium-macos/libpdfium.dylib
-          test -f src-tauri/bin/pdfium-macos/libpdfium.dylib
-
       - name: Prepare Ghostscript runtime and NSIS tools (Windows)
         if: matrix.platform == 'windows-latest'
         shell: pwsh
@@ -84,23 +68,6 @@ jobs:
           $gsRoot = Get-ChildItem "C:\Program Files\gs\gs*" -Directory | Sort-Object Name -Descending | Select-Object -First 1
           if (-not $gsRoot) { throw "Ghostscript installation folder not found." }
           Copy-Item $gsRoot.FullName "src-tauri/bin/ghostscript-win" -Recurse -Force
-
-      - name: Prepare PDFium runtime (Windows)
-        if: matrix.platform == 'windows-latest'
-        shell: pwsh
-        run: |
-          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/bblanchon/pdfium-binaries/releases/latest"
-          $pdfiumUrl = ($release.assets | Where-Object { $_.name -eq "pdfium-win-x64.tgz" } | Select-Object -First 1).browser_download_url
-          if (-not $pdfiumUrl) { throw "Failed to resolve PDFium Windows asset URL." }
-          $tmpRoot = Join-Path $env:TEMP "pdfium-win"
-          Remove-Item -Recurse -Force $tmpRoot -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Force -Path $tmpRoot | Out-Null
-          $archivePath = Join-Path $tmpRoot "pdfium-win-x64.tgz"
-          Invoke-WebRequest -Uri $pdfiumUrl -OutFile $archivePath
-          tar -xzf $archivePath -C $tmpRoot
-          New-Item -ItemType Directory -Force -Path src-tauri/bin/pdfium-win | Out-Null
-          Copy-Item (Join-Path $tmpRoot "bin/pdfium.dll") "src-tauri/bin/pdfium-win/pdfium.dll" -Force
-          if (-not (Test-Path "src-tauri/bin/pdfium-win/pdfium.dll")) { throw "Bundled PDFium DLL not found after copy." }
 
       - name: install frontend dependencies
         run: npm install
