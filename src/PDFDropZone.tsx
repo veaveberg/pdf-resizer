@@ -339,7 +339,7 @@ function PDFDropZone() {
     }
   }, [sessionScaleFactor]);
 
-  // Detect Ghostscript availability (Tauri only)
+  // Detect flatten engine availability (PDFium preferred, Ghostscript fallback).
   useEffect(() => {
     const checkGs = async () => {
       try {
@@ -2164,11 +2164,11 @@ function PDFDropZone() {
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--secondary-color)', fontSize: 14 }}>
               <label
-                title={!isTauri ? 'Requires desktop app with Ghostscript installed' :
+                title={!isTauri ? 'Requires desktop app build with flatten engine support' :
                   !ghostscriptAvailable
                     ? (isWindows
-                      ? 'Ghostscript is unavailable. Reinstall using the latest Windows installer release.'
-                      : 'Ghostscript is unavailable. This app expects a bundled sidecar; install Ghostscript only as fallback.')
+                      ? 'Flatten engine is unavailable. Reinstall using the latest Windows installer release.'
+                      : 'Flatten engine is unavailable. This app expects a bundled runtime; reinstall the latest release.')
                     : undefined}
                 style={{
                   display: 'flex',

@@ -3,6 +3,7 @@
     windows_subsystem = "windows"
 )]
 
+use pdfium_render::prelude::*;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -13,6 +14,12 @@ struct PendingOpenPaths(Mutex<Vec<String>>);
 
 #[derive(Clone, Default)]
 struct GhostscriptRuntime {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    roots: Vec<PathBuf>,
+}
+
+#[derive(Clone, Default)]
+struct PdfiumRuntime {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     roots: Vec<PathBuf>,
 }
@@ -49,10 +56,7 @@ impl GhostscriptRuntime {
     fn mac_root_string(&self) -> Option<String> {
         #[cfg(target_os = "macos")]
         {
-            return self
-                .roots
-                .first()
-                .map(|p| p.to_string_lossy().to_string());
+            return self.roots.first().map(|p| p.to_string_lossy().to_string());
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -63,10 +67,7 @@ impl GhostscriptRuntime {
     fn windows_root_string(&self) -> Option<String> {
         #[cfg(target_os = "windows")]
         {
-            return self
-                .roots
-                .first()
-                .map(|p| p.to_string_lossy().to_string());
+            return self.roots.first().map(|p| p.to_string_lossy().to_string());
         }
         #[cfg(not(target_os = "windows"))]
         {
@@ -104,7 +105,8 @@ fn take_pending_open_paths(state: State<'_, PendingOpenPaths>) -> Vec<String> {
 #[cfg(target_os = "windows")]
 const GHOSTSCRIPT_FALLBACK_COMMANDS: [&str; 3] = ["gswin64c", "gswin32c", "gs"];
 #[cfg(target_os = "macos")]
-const GHOSTSCRIPT_FALLBACK_COMMANDS: [&str; 3] = ["gs", "/opt/homebrew/bin/gs", "/usr/local/bin/gs"];
+const GHOSTSCRIPT_FALLBACK_COMMANDS: [&str; 3] =
+    ["gs", "/opt/homebrew/bin/gs", "/usr/local/bin/gs"];
 #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
 const GHOSTSCRIPT_FALLBACK_COMMANDS: [&str; 1] = ["gs"];
 
@@ -277,9 +279,60 @@ fn run_ghostscript(
     Err(error)
 }
 
+fn bind_pdfium(runtime: &PdfiumRuntime) -> Result<Pdfium, String> {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        for root in &runtime.roots {
+            let direct_candidate = Pdfium::pdfium_platform_library_name_at_path(root);
+            if direct_candidate.exists() {
+                if let Ok(bindings) = Pdfium::bind_to_library(&direct_candidate) {
+                    return Ok(Pdfium::new(bindings));
+                }
+            }
+
+            let lib_candidate = Pdfium::pdfium_platform_library_name_at_path(&root.join("lib"));
+            if lib_candidate.exists() {
+                if let Ok(bindings) = Pdfium::bind_to_library(&lib_candidate) {
+                    return Ok(Pdfium::new(bindings));
+                }
+            }
+        }
+    }
+
+    Pdfium::bind_to_system_library()
+        .map(Pdfium::new)
+        .map_err(|e| format!("PDFium bind failed: {}", e))
+}
+
+fn flatten_with_pdfium(pdf_bytes: Vec<u8>, runtime: &PdfiumRuntime) -> Result<Vec<u8>, String> {
+    let pdfium = bind_pdfium(runtime)?;
+    let mut document = pdfium
+        .load_pdf_from_byte_vec(pdf_bytes, None)
+        .map_err(|e| format!("PDFium load failed: {}", e))?;
+    let page_count = document.pages().len();
+    for page_index in 0..page_count {
+        let mut page = document
+            .pages_mut()
+            .get(page_index)
+            .map_err(|e| format!("PDFium page load failed at index {}: {}", page_index, e))?;
+        page.flatten()
+            .map_err(|e| format!("PDFium flatten failed at index {}: {}", page_index, e))?;
+    }
+    document
+        .save_to_bytes()
+        .map_err(|e| format!("PDFium save failed: {}", e))
+}
+
 /// Check if Ghostscript is available (bundled or on PATH).
 #[tauri::command]
-fn check_ghostscript(runtime: State<'_, GhostscriptRuntime>) -> String {
+fn check_ghostscript(
+    runtime: State<'_, GhostscriptRuntime>,
+    pdfium_runtime: State<'_, PdfiumRuntime>,
+) -> String {
+    if bind_pdfium(&pdfium_runtime).is_ok() {
+        return String::from("PDFium");
+    }
+
     match run_ghostscript(&["--version"], &runtime, None) {
         Ok(output) => output.stdout.trim().to_string(),
         Err(e) => {
@@ -302,7 +355,9 @@ fn debug_ghostscript_probe(runtime: State<'_, GhostscriptRuntime>) -> Ghostscrip
         return GhostscriptProbeResult {
             attempted: Vec::new(),
             selected: None,
-            last_error: Some(String::from("debug_ghostscript_probe is disabled in production builds.")),
+            last_error: Some(String::from(
+                "debug_ghostscript_probe is disabled in production builds.",
+            )),
             mac_root: runtime.mac_root_string(),
             windows_root: runtime.windows_root_string(),
         };
@@ -327,7 +382,15 @@ fn debug_ghostscript_probe(runtime: State<'_, GhostscriptRuntime>) -> Ghostscrip
 
 /// Flatten a PDF using Ghostscript (bundled sidecar preferred).
 #[tauri::command]
-fn flatten_pdf(pdf_bytes: Vec<u8>, runtime: State<'_, GhostscriptRuntime>) -> Result<Vec<u8>, String> {
+fn flatten_pdf(
+    pdf_bytes: Vec<u8>,
+    runtime: State<'_, GhostscriptRuntime>,
+    pdfium_runtime: State<'_, PdfiumRuntime>,
+) -> Result<Vec<u8>, String> {
+    if let Ok(output) = flatten_with_pdfium(pdf_bytes.clone(), &pdfium_runtime) {
+        return Ok(output);
+    }
+
     use std::io::Write;
 
     let tmp_dir = std::env::temp_dir();
@@ -447,12 +510,68 @@ fn resolve_ghostscript_runtime(app: &tauri::App) -> GhostscriptRuntime {
     runtime
 }
 
+fn resolve_pdfium_runtime(app: &tauri::App) -> PdfiumRuntime {
+    let resource_dir = app.path_resolver().resource_dir();
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.to_path_buf()));
+
+    let mut runtime = PdfiumRuntime::default();
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut roots = Vec::new();
+        if let Some(base) = resource_dir.as_ref() {
+            push_root_if_exists(&mut roots, base.join("bin").join("pdfium-macos"));
+            push_root_if_exists(&mut roots, base.join("bin").join("pdfium"));
+            push_root_if_exists(&mut roots, base.join("Frameworks"));
+        }
+        if let Some(base) = exe_dir.as_ref() {
+            if let Some(contents_dir) = base.parent() {
+                if let Some(app_dir) = contents_dir.parent() {
+                    let resources = app_dir.join("Resources");
+                    push_root_if_exists(&mut roots, resources.join("bin").join("pdfium-macos"));
+                    push_root_if_exists(&mut roots, resources.join("bin").join("pdfium"));
+                }
+            }
+        }
+        push_root_if_exists(&mut roots, manifest_dir.join("bin").join("pdfium-macos"));
+        push_root_if_exists(&mut roots, manifest_dir.join("bin").join("pdfium"));
+        runtime.roots = roots;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut roots = Vec::new();
+        if let Some(base) = resource_dir.as_ref() {
+            push_root_if_exists(&mut roots, base.join("bin").join("pdfium-win"));
+            push_root_if_exists(&mut roots, base.join("bin").join("pdfium"));
+            push_root_if_exists(&mut roots, base.join("pdfium-win"));
+            push_root_if_exists(&mut roots, base.join("pdfium"));
+        }
+        if let Some(base) = exe_dir.as_ref() {
+            push_root_if_exists(&mut roots, base.join("bin").join("pdfium-win"));
+            push_root_if_exists(&mut roots, base.join("bin").join("pdfium"));
+            push_root_if_exists(&mut roots, base.join("pdfium-win"));
+            push_root_if_exists(&mut roots, base.join("pdfium"));
+        }
+        push_root_if_exists(&mut roots, manifest_dir.join("bin").join("pdfium-win"));
+        push_root_if_exists(&mut roots, manifest_dir.join("bin").join("pdfium"));
+        runtime.roots = roots;
+    }
+
+    runtime
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(PendingOpenPaths::default())
         .setup(|app| {
             let gs_runtime = resolve_ghostscript_runtime(app);
             app.manage(gs_runtime);
+            let pdfium_runtime = resolve_pdfium_runtime(app);
+            app.manage(pdfium_runtime);
             let startup_paths = collect_startup_file_paths();
             if !startup_paths.is_empty() {
                 if let Some(main_window) = app.get_window("main") {

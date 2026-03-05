@@ -52,7 +52,10 @@
       },
       "resources": [
         "bin/ghostscript",
-        "bin/ghostscript-win"
+        "bin/ghostscript-win",
+        "bin/pdfium",
+        "bin/pdfium-win",
+        "bin/pdfium-macos"
       ],
       "shortDescription": "",
       "targets": [],
