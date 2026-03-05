@@ -323,19 +323,63 @@ fn flatten_with_pdfium(pdf_bytes: Vec<u8>, runtime: &PdfiumRuntime) -> Result<Ve
         .map_err(|e| format!("PDFium save failed: {}", e))
 }
 
+fn flatten_with_ghostscript(
+    pdf_bytes: Vec<u8>,
+    runtime: &GhostscriptRuntime,
+) -> Result<Vec<u8>, String> {
+    use std::io::Write;
+
+    let tmp_dir = std::env::temp_dir();
+    let input_path = tmp_dir.join("pdfresizer_flatten_input.pdf");
+    let output_path = tmp_dir.join("pdfresizer_flatten_output.pdf");
+
+    std::fs::File::create(&input_path)
+        .and_then(|mut f| f.write_all(&pdf_bytes))
+        .map_err(|e| format!("Failed to write temp input file: {}", e))?;
+
+    let output_file_arg = format!("-sOutputFile={}", output_path.display());
+    let input_file_arg = format!("{}", input_path.display());
+    let args = [
+        "-dBATCH",
+        "-dNOPAUSE",
+        "-dSAFER",
+        "-dQUIET",
+        "-sDEVICE=pdfwrite",
+        "-dNoOutputFonts",
+        "-dCompatibilityLevel=1.7",
+        output_file_arg.as_str(),
+        input_file_arg.as_str(),
+    ];
+    let result = run_ghostscript(&args, runtime, None)?;
+
+    if !result.status.success() {
+        let stderr = result.stderr;
+        let _ = std::fs::remove_file(&input_path);
+        let _ = std::fs::remove_file(&output_path);
+        return Err(format!("Ghostscript failed: {}", stderr));
+    }
+
+    let output_bytes = std::fs::read(&output_path)
+        .map_err(|e| format!("Failed to read flattened output: {}", e))?;
+
+    let _ = std::fs::remove_file(&input_path);
+    let _ = std::fs::remove_file(&output_path);
+
+    Ok(output_bytes)
+}
+
 /// Check if Ghostscript is available (bundled or on PATH).
 #[tauri::command]
 fn check_ghostscript(
     runtime: State<'_, GhostscriptRuntime>,
     pdfium_runtime: State<'_, PdfiumRuntime>,
 ) -> String {
-    if bind_pdfium(&pdfium_runtime).is_ok() {
-        return String::from("PDFium");
-    }
-
     match run_ghostscript(&["--version"], &runtime, None) {
         Ok(output) => output.stdout.trim().to_string(),
         Err(e) => {
+            if bind_pdfium(&pdfium_runtime).is_ok() {
+                return String::from("PDFium");
+            }
             // Missing Ghostscript is an expected state in dev; keep logs quiet for ENOENT-like cases.
             let lower = e.to_lowercase();
             let missing = lower.contains("no such file or directory")
@@ -387,52 +431,10 @@ fn flatten_pdf(
     runtime: State<'_, GhostscriptRuntime>,
     pdfium_runtime: State<'_, PdfiumRuntime>,
 ) -> Result<Vec<u8>, String> {
-    if let Ok(output) = flatten_with_pdfium(pdf_bytes.clone(), &pdfium_runtime) {
+    if let Ok(output) = flatten_with_ghostscript(pdf_bytes.clone(), &runtime) {
         return Ok(output);
     }
-
-    use std::io::Write;
-
-    let tmp_dir = std::env::temp_dir();
-    let input_path = tmp_dir.join("pdfresizer_flatten_input.pdf");
-    let output_path = tmp_dir.join("pdfresizer_flatten_output.pdf");
-
-    // Write input bytes to temp file
-    std::fs::File::create(&input_path)
-        .and_then(|mut f| f.write_all(&pdf_bytes))
-        .map_err(|e| format!("Failed to write temp input file: {}", e))?;
-
-    let output_file_arg = format!("-sOutputFile={}", output_path.display());
-    let input_file_arg = format!("{}", input_path.display());
-    let args = [
-        "-dBATCH",
-        "-dNOPAUSE",
-        "-dSAFER",
-        "-dQUIET",
-        "-sDEVICE=pdfwrite",
-        "-dNoOutputFonts",
-        "-dCompatibilityLevel=1.7",
-        output_file_arg.as_str(),
-        input_file_arg.as_str(),
-    ];
-    let result = run_ghostscript(&args, &runtime, None)?;
-
-    if !result.status.success() {
-        let stderr = result.stderr;
-        let _ = std::fs::remove_file(&input_path);
-        let _ = std::fs::remove_file(&output_path);
-        return Err(format!("Ghostscript failed: {}", stderr));
-    }
-
-    // Read flattened output
-    let output_bytes = std::fs::read(&output_path)
-        .map_err(|e| format!("Failed to read flattened output: {}", e))?;
-
-    // Clean up temp files
-    let _ = std::fs::remove_file(&input_path);
-    let _ = std::fs::remove_file(&output_path);
-
-    Ok(output_bytes)
+    flatten_with_pdfium(pdf_bytes, &pdfium_runtime)
 }
 
 fn collect_startup_file_paths() -> Vec<String> {
