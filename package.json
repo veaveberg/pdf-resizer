@@ -5,22 +5,39 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "npm run check && vite build",
+    "check": "npm run typecheck && npm test && node scripts/verify_release_config.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test src/*.test.ts",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "prepare:ghostscript:windows": "powershell -ExecutionPolicy Bypass -File scripts/prepare_windows_ghostscript_runtime.ps1 -OutputRoot src-tauri/bin/ghostscript-win",
+    "prepare:ghostscript:windows:py": "python scripts/prepare_windows_ghostscript_runtime.py --output-root src-tauri/bin/ghostscript-win",
+    "prepare:ghostscript:macos": "python3 scripts/prepare_macos_ghostscript_runtime.py --output-root src-tauri/bin/ghostscript",
+    "tauri:dev:macos": "CARGO_TARGET_DIR=target-macos npm run tauri dev -- --config src-tauri/tauri.macos.conf.json",
+    "tauri:build:macos": "CARGO_TARGET_DIR=target-macos npm run tauri build -- --config src-tauri/tauri.macos.conf.json --target universal-apple-darwin --bundles app",
+    "tauri:dev:windows": "CARGO_TARGET_DIR=target-windows npm run tauri dev -- --config src-tauri/tauri.windows.conf.json",
+    "tauri:build:windows": "CARGO_TARGET_DIR=target-windows npm run tauri build -- --target x86_64-pc-windows-msvc --bundles nsis",
+    "tauri:build:macos:dmg": "CARGO_TARGET_DIR=target-macos npm run tauri build -- --config src-tauri/tauri.macos.conf.json --target universal-apple-darwin --bundles app,dmg",
+    "prepare:ghostscript:macos:signed": "python3 scripts/prepare_macos_ghostscript_runtime.py --sign-identity \"$APPLE_SIGNING_IDENTITY\" --output-root src-tauri/bin/ghostscript",
+    "sign:ghostscript:macos": "scripts/sign_macos_ghostscript_runtime.sh"
   },
   "dependencies": {
-    "@tauri-apps/api": "^1.0.0",
+    "@okathira/ghostpdl-wasm": "^1.1.0",
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.3",
     "pdf-lib": "^1.17.1",
     "pdfjs-dist": "^5.2.133",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^1.0.0",
+    "@tauri-apps/cli": "^2.11.4",
+    "@types/node": "^24.0.0",
     "@types/react": "^18.0.15",
     "@types/react-dom": "^18.0.6",
     "@vitejs/plugin-react": "^4.5.0",
+    "typescript": "^7.0.2",
     "vite": "^6.3.5",
     "vite-plugin-svgr": "^4.3.0"
   }

@@ -25,7 +25,7 @@ jobs:
             args: --target universal-apple-darwin --bundles app,dmg
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
-            args: --target x86_64-pc-windows-msvc --bundles none
+            args: --target x86_64-pc-windows-msvc --bundles nsis
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -34,7 +34,7 @@ jobs:
       - name: setup node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: 'npm'
 
       - name: install Rust stable
@@ -58,11 +58,11 @@ jobs:
             --gs-bin "$GS_BIN" \
             --output-root src-tauri/bin/ghostscript
 
-      - name: Prepare Ghostscript runtime and NSIS tools (Windows)
+      - name: Prepare Ghostscript runtime (Windows)
         if: matrix.platform == 'windows-latest'
         shell: pwsh
         run: |
-          choco install ghostscript nsis -y
+          choco install ghostscript -y
           New-Item -ItemType Directory -Force -Path src-tauri/bin | Out-Null
           Remove-Item -Recurse -Force src-tauri/bin/ghostscript-win -ErrorAction SilentlyContinue
           $gsRoot = Get-ChildItem "C:\Program Files\gs\gs*" -Directory | Sort-Object Name -Descending | Select-Object -First 1
@@ -70,7 +70,7 @@ jobs:
           Copy-Item $gsRoot.FullName "src-tauri/bin/ghostscript-win" -Recurse -Force
 
       - name: install frontend dependencies
-        run: npm install
+        run: npm ci
 
       - name: Clean stale bundled Ghostscript outputs
         if: matrix.platform == 'macos-latest'
@@ -85,6 +85,8 @@ jobs:
           Remove-Item -Recurse -Force "src-tauri/target/release/bin/ghostscript-win" -ErrorAction SilentlyContinue
 
       - name: Build Tauri bundles
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ matrix.platform == 'macos-latest' && '-' || '' }}
         run: npm run tauri build -- ${{ matrix.args }}
 
       - name: Smoke test bundled Ghostscript (macOS)
@@ -109,81 +111,36 @@ jobs:
             --gs "$GS_BIN" \
             --gs-root "$APP_PATH/Contents/Resources/bin/ghostscript"
 
-      - name: Build and smoke test NSIS installer (Windows)
+      - name: Smoke test NSIS installer (Windows)
         if: matrix.platform == 'windows-latest'
         shell: pwsh
         run: |
           $releaseDir = "src-tauri/target/${{ matrix.target }}/release"
-          $payloadDir = "$releaseDir/nsis-payload"
           $artifactDir = "artifacts"
-
-          Remove-Item -Recurse -Force $payloadDir -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Force -Path $payloadDir | Out-Null
-          New-Item -ItemType Directory -Force -Path "$payloadDir/bin" | Out-Null
           New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
 
-          Copy-Item "$releaseDir/PDF Resizer.exe" "$payloadDir/PDF Resizer.exe" -Force
-          Copy-Item "src-tauri/bin/ghostscript-win" "$payloadDir/bin/ghostscript-win" -Recurse -Force
-
-          $gsExe = Get-ChildItem "$payloadDir/bin/ghostscript-win/bin/gswin64c.exe" -File | Select-Object -First 1
-          if (-not $gsExe) { throw "Staged Ghostscript binary not found." }
-          python scripts/ghostscript_smoke.py --gs "$($gsExe.FullName)" --gs-root "$payloadDir/bin/ghostscript-win"
-
-          $version = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).package.version
-          $outputFile = (Resolve-Path $artifactDir).Path + "\\PDF-Resizer-Windows.exe"
-          $payloadAbs = (Resolve-Path $payloadDir).Path
-
-          $makensis = (Get-Command makensis -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1)
-          if (-not $makensis) {
-            $candidates = @(
-              "$env:ProgramFiles\\NSIS\\makensis.exe",
-              "${env:ProgramFiles(x86)}\\NSIS\\makensis.exe",
-              "C:\\ProgramData\\chocolatey\\bin\\makensis.exe"
-            )
-            $makensis = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-          }
-          if (-not $makensis) { throw "makensis executable not found after NSIS install." }
-
-          & $makensis "/DAPP_VERSION=$version" "/DOUTPUT_FILE=$outputFile" "/DPAYLOAD_DIR=$payloadAbs" "src-tauri\\nsis\\installer.nsi"
-          if ($LASTEXITCODE -ne 0) { throw "makensis failed with exit code $LASTEXITCODE" }
+          $installer = Get-ChildItem "$releaseDir/bundle/nsis/*-setup.exe" -File | Select-Object -First 1
+          if (-not $installer) { throw "Tauri NSIS installer not found." }
 
           $installDir = "$env:TEMP\\pdfresizer-smoke-install"
           Remove-Item -Recurse -Force $installDir -ErrorAction SilentlyContinue
-          & $outputFile /S "/D=$installDir"
+          & $installer.FullName /S "/D=$installDir"
           if ($LASTEXITCODE -ne 0) { throw "NSIS installer exited with code $LASTEXITCODE" }
 
           $resolvedInstallDir = $installDir
-          $regInstallDir = (Get-ItemProperty -Path "HKLM:\\Software\\PDF Resizer" -Name InstallDir -ErrorAction SilentlyContinue).InstallDir
-          if ($regInstallDir) {
-            $resolvedInstallDir = $regInstallDir
-          } elseif (Test-Path "$env:ProgramFiles\\PDF Resizer") {
-            $resolvedInstallDir = "$env:ProgramFiles\\PDF Resizer"
-          } elseif (Test-Path "${env:ProgramFiles(x86)}\\PDF Resizer") {
-            $resolvedInstallDir = "${env:ProgramFiles(x86)}\\PDF Resizer"
-          }
-
-          $installedCandidates = @(
-            "$resolvedInstallDir\\bin\\ghostscript-win\\bin\\gswin64c.exe",
-            "$resolvedInstallDir\\ghostscript-win\\bin\\gswin64c.exe"
-          )
-          $installedGs = $installedCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          $installedGs = Get-ChildItem $resolvedInstallDir -Filter gswin64c.exe -File -Recurse | Select-Object -First 1
           if (-not $installedGs) {
-            throw "Installed Ghostscript binary not found. Tried: $($installedCandidates -join ', ')"
+            throw "Installed Ghostscript binary not found under $resolvedInstallDir."
           }
-          $installedGsRootCandidates = @(
-            "$resolvedInstallDir\\bin\\ghostscript-win",
-            "$resolvedInstallDir\\ghostscript-win"
-          )
-          $installedGsRoot = $installedGsRootCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if (-not $installedGsRoot) {
-            throw "Installed Ghostscript root not found. Tried: $($installedGsRootCandidates -join ', ')"
-          }
-          python scripts/ghostscript_smoke.py --gs "$installedGs" --gs-root "$installedGsRoot"
+          $installedGsRoot = Split-Path (Split-Path $installedGs.FullName -Parent) -Parent
+          python scripts/ghostscript_smoke.py --gs "$($installedGs.FullName)" --gs-root "$installedGsRoot"
 
-          $uninstaller = "$resolvedInstallDir\\Uninstall PDF Resizer.exe"
+          $uninstaller = "$resolvedInstallDir\\uninstall.exe"
           if (Test-Path $uninstaller) {
             & $uninstaller /S
           }
+
+          Copy-Item $installer.FullName "$artifactDir/PDF-Resizer-Windows.exe" -Force
 
       - name: Prepare DMG artifact (macOS)
         if: matrix.platform == 'macos-latest'

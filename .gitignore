@@ -8,9 +8,17 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
+node_modules_macos_backup_*
 dist
 dist-ssr
 *.local
+src-tauri/target
+src-tauri/target-macos
+src-tauri/target-windows
+src-tauri/src-tauri/
+src-tauri/gen/
+scripts/__pycache__/
+.tools/
 
 # Editor directories and files
 .vscode/*

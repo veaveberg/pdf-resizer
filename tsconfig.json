@@ -2,7 +2,7 @@
   "compilerOptions": {
     "target": "ESNext",
     "module": "ESNext",
-    "moduleResolution": "Node",
+    "moduleResolution": "Bundler",
     "jsx": "react-jsx",
     "strict": true,
     "esModuleInterop": true,
@@ -11,11 +11,12 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "allowSyntheticDefaultImports": true,
-    "baseUrl": "./src"
+    "allowImportingTsExtensions": true,
+    "types": ["node"]
   },
   "include": [
     "src/**/*.ts",
     "src/**/*.tsx",
     "src/**/*.d.ts"
   ]
-} 
+}

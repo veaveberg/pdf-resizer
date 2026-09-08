@@ -1,0 +1,14 @@
+{
+  "bundle": {
+    "targets": ["nsis"],
+    "resources": ["bin/ghostscript-win"],
+    "windows": {
+      "digestAlgorithm": "sha256",
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false,
+        "languages": ["English"]
+      }
+    }
+  }
+}

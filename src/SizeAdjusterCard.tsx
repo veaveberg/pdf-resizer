@@ -49,6 +49,16 @@ export default function SizeAdjusterCard({
   onBlur,
   presets,
   onEditPresets,
+  showPdfPostProcessControls,
+  outlineText,
+  rasterize,
+  rasterizeDpi,
+  postProcessEnabled,
+  postProcessTitle,
+  onOutlineTextChange,
+  onRasterizeChange,
+  onRasterizeDpiChange,
+  allowExtendColorIntoPadding,
 }: any) {
   const { mode, width, height } = adjuster;
   const isPng = adjuster.kind === 'png';
@@ -123,6 +133,7 @@ export default function SizeAdjusterCard({
   const [ppiInput, setPpiInput] = useState(formatPpiInput(ppi));
   const [marginInput, setMarginInput] = useState(formatMMInput(marginMm));
   const [scaleInput, setScaleInput] = useState(formatScaleInput(scaleFactor));
+  const [rasterizeDpiInput, setRasterizeDpiInput] = useState(String(Math.max(72, Math.round(Number(rasterizeDpi ?? 300)))));
   const [scaleUnit, setScaleUnit] = useState<'factor' | 'percent'>('factor');
 
   const maxMarginMm = Math.max(0, (Math.min(Number(width), Number(height)) - Number(pdfMinDimensionMm ?? 0)) / 2);
@@ -142,6 +153,10 @@ export default function SizeAdjusterCard({
   React.useEffect(() => {
     setMarginInput(formatMMInput(marginMm));
   }, [marginMm]);
+
+  React.useEffect(() => {
+    setRasterizeDpiInput(String(Math.max(72, Math.round(Number(rasterizeDpi ?? 300)))));
+  }, [rasterizeDpi]);
 
   React.useEffect(() => {
     const display = scaleUnit === 'percent' ? scaleFactor * 100 : scaleFactor;
@@ -558,6 +573,57 @@ export default function SizeAdjusterCard({
     onChange({ ...adjuster, width: height, height: width, source: 'manual' });
   };
 
+  const applyRasterizeDpi = (nextRaw: number) => {
+    const nextDpi = Math.min(Math.max(Math.round(Number(nextRaw)), 72), 1200);
+    onRasterizeDpiChange?.(nextDpi);
+  };
+
+  const handleRasterizeDpi = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value.replace(/[^\d]/g, '');
+    setRasterizeDpiInput(val);
+    if (!/^\d*$/.test(val) || val === '') return;
+    const dpi = Number(val);
+    if (Number.isFinite(dpi) && dpi > 0) applyRasterizeDpi(dpi);
+  };
+
+  const handleRasterizeDpiBlur = () => {
+    const parsed = Number(rasterizeDpiInput);
+    const nextDpi = Number.isFinite(parsed) && parsed > 0
+      ? Math.min(Math.max(Math.round(parsed), 72), 1200)
+      : Math.max(72, Math.round(Number(rasterizeDpi ?? 300)));
+    setRasterizeDpiInput(String(nextDpi));
+    applyRasterizeDpi(nextDpi);
+  };
+
+  const handleRasterizeDpiKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    let dpi = Number(rasterizeDpiInput);
+    if (!Number.isFinite(dpi)) dpi = Math.max(72, Math.round(Number(rasterizeDpi ?? 300)));
+    let next = dpi;
+    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      if (e.shiftKey) {
+        if (e.key === 'ArrowUp') {
+          next = Math.ceil(dpi / 10) * 10;
+          if (next === dpi) next += 10;
+        } else {
+          next = Math.floor(dpi / 10) * 10;
+          if (next === dpi) next -= 10;
+        }
+      } else {
+        if (e.key === 'ArrowUp') {
+          next = Math.ceil(dpi);
+          if (next === dpi) next += 1;
+        } else {
+          next = Math.floor(dpi);
+          if (next === dpi) next -= 1;
+        }
+      }
+      next = Math.min(Math.max(next, 72), 1200);
+      setRasterizeDpiInput(String(next));
+      applyRasterizeDpi(next);
+      e.preventDefault();
+    }
+  };
+
   const segmentedRef = useRef<HTMLDivElement>(null);
   const [thumbStyle, setThumbStyle] = useState({ left: 0, width: 0 });
   const buttonRefs = useRef<(HTMLButtonElement | null)[]>([]);
@@ -962,6 +1028,90 @@ export default function SizeAdjusterCard({
                   <span style={{ minWidth: 126 }} />
                 )}
               </div>
+              {!isPng && marginMm > 0 && allowExtendColorIntoPadding && (
+                <label
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    minHeight: 24,
+                    marginLeft: 64,
+                    fontSize: 13,
+                    color: 'var(--text-color)',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={adjuster.extendColorIntoPadding === true}
+                    onChange={event => onChange({
+                      ...adjuster,
+                      extendColorIntoPadding: event.target.checked,
+                      source: 'manual',
+                    })}
+                  />
+                  Extend color into padding
+                </label>
+              )}
+              {showPdfPostProcessControls && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, minHeight: 28, width: '100%', flexWrap: 'wrap', marginTop: 4 }}>
+                  <label
+                    title={postProcessTitle}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      cursor: postProcessEnabled ? 'pointer' : 'not-allowed',
+                      opacity: postProcessEnabled ? 1 : 0.5,
+                      color: 'var(--text-color)',
+                      fontSize: 14,
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={!!outlineText}
+                      onChange={e => onOutlineTextChange?.(e.target.checked)}
+                      disabled={!postProcessEnabled}
+                      style={{ marginRight: 6 }}
+                    />
+                    Outline text
+                  </label>
+                  <label
+                    title={postProcessTitle ?? 'Rasterize exports each page into a lossless Flate-compressed CMYK image PDF.'}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      cursor: postProcessEnabled ? 'pointer' : 'not-allowed',
+                      opacity: postProcessEnabled ? 1 : 0.5,
+                      color: 'var(--text-color)',
+                      fontSize: 14,
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={!!rasterize}
+                      onChange={e => onRasterizeChange?.(e.target.checked)}
+                      disabled={!postProcessEnabled}
+                      style={{ marginRight: 6 }}
+                    />
+                    Rasterize
+                  </label>
+                  {rasterize && (
+                    <>
+                      <span style={{ fontSize: 14 }}>dpi:</span>
+                      <input
+                        type="text"
+                        value={rasterizeDpiInput}
+                        onChange={handleRasterizeDpi}
+                        onFocus={() => onFocus(adjuster.id)}
+                        onBlur={() => { handleRasterizeDpiBlur(); onBlur(); }}
+                        onKeyDown={handleRasterizeDpiKeyDown}
+                        min={72}
+                        style={{ width: 44, textAlign: 'right', borderRadius: 4, border: '1px solid var(--input-border)', fontSize: 14, padding: '2px 4px', background: 'var(--input-bg)', color: 'var(--text-color)' }}
+                      />
+                    </>
+                  )}
+                </div>
+              )}
             </>
           )}
         </div>

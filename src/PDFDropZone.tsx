@@ -8,12 +8,48 @@ import PlusCircleFill from './assets/plus.circle.fill.svg?react';
 import FileNameEditor from './FileNameEditor';
 import SaveButtonWithStatus from './SaveButtonWithStatus';
 import './pdf-skeleton.css';
-import { PDFDocument, rgb } from 'pdf-lib';
-import { writeBinaryFile, readBinaryFile, exists } from '@tauri-apps/api/fs';
-import { open } from '@tauri-apps/api/dialog';
-import { invoke } from '@tauri-apps/api/tauri';
+import { PDFDocument, PDFName, PDFRawStream, rgb } from 'pdf-lib';
+import { invoke, isTauri as isTauriRuntime } from '@tauri-apps/api/core';
+import { open } from '@tauri-apps/plugin-dialog';
 import { listen } from '@tauri-apps/api/event';
+import { getCurrentWebview } from '@tauri-apps/api/webview';
 import PresetsEditor from './PresetsEditor';
+import {
+  type ImportOrigin,
+  initialExportDirectory,
+  nativeErrorMessage,
+  selectedSubfolder,
+} from './exportPaths';
+import {
+  contentFit,
+  drawEdgeExtension,
+  mapContent,
+  paddingStripRegions,
+  type Rect,
+} from './paddingExtension';
+import {
+  drawDeviceCmykImage,
+  rgbaToDeviceCmyk,
+  type CmykRasterImage,
+} from './pdfCmykImage';
+import {
+  cmykEdgeSampleRequest,
+  drawCmykVectorPadding,
+} from './pdfVectorPadding';
+import {
+  BrowserPdfPostProcessor,
+  TauriPdfPostProcessor,
+  type PdfPostProcessor,
+} from './pdfPostProcessor';
+import {
+  ghostscriptPageNumbers,
+  outputPageIndex,
+  type PdfPageOrder,
+  uniquePageIndexes,
+} from './pdfPageSelection';
+import { extractPageCmykIccProfile } from './pdfCmykProfile';
+import { pageHasFontResources } from './pdfFontResources';
+import { rebasePageSoftMasks } from './pdfSoftMaskTransform';
 
 // Set the workerSrc to the local bundled worker URL for pdf.js
 GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.mjs', import.meta.url).toString();
@@ -115,21 +151,6 @@ function getTrimmedSize(pdfSize: { width: number; height: number } | null, trimM
   return { width: trimmedWidth, height: trimmedHeight };
 }
 
-function getDirectoryFromPath(filePath: string): string {
-  if (!filePath) return '';
-  const normalized = filePath.replace(/\\/g, '/');
-  const idx = normalized.lastIndexOf('/');
-  if (idx <= 0) return '';
-  return normalized.slice(0, idx);
-}
-
-function getBaseNameFromPath(filePath: string): string {
-  if (!filePath) return 'imported-file';
-  const normalized = filePath.replace(/\\/g, '/');
-  const parts = normalized.split('/');
-  return parts[parts.length - 1] || 'imported-file';
-}
-
 function applyCanvasPaddingMask(
   ctx: CanvasRenderingContext2D,
   width: number,
@@ -165,6 +186,7 @@ interface Adjuster {
   height: number;
   marginMm?: number;
   paddingMode?: 'inside' | 'outside';
+  extendColorIntoPadding?: boolean;
   scaleFactor?: number;
   ppi?: number;
   pngSourceWidthMm?: number;
@@ -181,6 +203,17 @@ interface ExportTask {
   pageIdx?: number;
   outputBaseName: string;
   extension: 'pdf' | 'png';
+}
+
+interface NativeImportedFile {
+  fileName: string;
+  directory: string;
+  bytes: number[];
+}
+
+interface PdfPaddingStrip {
+  image: CmykRasterImage;
+  destination: Rect;
 }
 
 type SourceKind = 'pdf' | 'image' | null;
@@ -221,6 +254,7 @@ function getPaddingLayoutMm(adjuster: Adjuster) {
 }
 
 function PDFDropZone() {
+  const isTauri = isTauriRuntime();
   const [file, setFile] = useState<File | null>(null);
   const [sourceKind, setSourceKind] = useState<SourceKind>(null);
   const [fileName, setFileName] = useState('');
@@ -267,6 +301,7 @@ function PDFDropZone() {
               : (adj?.mode || 'fill'),
             marginMm: adj?.kind === 'png' ? adj?.marginMm : Math.max(0, Number(adj?.marginMm ?? 0)),
             paddingMode: adj?.kind === 'png' ? adj?.paddingMode : ((adj?.paddingMode === 'outside') ? 'outside' : 'inside'),
+            extendColorIntoPadding: adj?.kind === 'pdf' && adj?.extendColorIntoPadding === true,
             scaleFactor: adj?.kind === 'png' ? adj?.scaleFactor : Math.max(0.01, Number(adj?.scaleFactor ?? 1)),
             ppi: adj?.kind === 'png' ? Math.max(1, Number(adj?.ppi ?? 300)) : adj?.ppi,
             pngSourceWidthMm: adj?.kind === 'png'
@@ -284,7 +319,7 @@ function PDFDropZone() {
     } catch (e) {
       console.error('Failed to load adjusters', e);
     }
-    return [{ id: crypto.randomUUID(), kind: 'pdf', mode: 'fill', width: 210, height: 297, marginMm: 0, paddingMode: 'inside', scaleFactor: 1, source: 'pdf' }];
+    return [{ id: crypto.randomUUID(), kind: 'pdf', mode: 'fill', width: 210, height: 297, marginMm: 0, paddingMode: 'inside', extendColorIntoPadding: false, scaleFactor: 1, source: 'pdf' }];
   });
   const [trimInput, setTrimInput] = useState('0');
   const [isLoading, setIsLoading] = useState(false);
@@ -302,6 +337,7 @@ function PDFDropZone() {
   const [unsupportedFormatMessage, setUnsupportedFormatMessage] = useState<string | null>(null);
   const [conflictFiles, setConflictFiles] = useState<Array<{ fileName: string; isConflict: boolean; shouldOverwrite: boolean; originalPath?: string; taskId?: string }>>([]);
   const [pendingExportTasks, setPendingExportTasks] = useState<ExportTask[]>([]);
+  const [pendingExportDirectory, setPendingExportDirectory] = useState('');
   const [focusedAdjusterId, setFocusedAdjusterId] = useState<string | null>(null);
   const [cropOverlay, setCropOverlay] = useState<{ top: number; right: number; bottom: number; left: number } | null>(null);
   const [renderedPdfCssSize, setRenderedPdfCssSize] = useState<{ width: number; height: number } | null>(null);
@@ -319,8 +355,11 @@ function PDFDropZone() {
   });
   const [showPresetsEditor, setShowPresetsEditor] = useState(false);
   const [newPresetState, setNewPresetState] = useState({ name: '', width: '', height: '' });
-  const [flatten, setFlatten] = useState(false);
+  const [outlineText, setOutlineText] = useState(false);
+  const [rasterize, setRasterize] = useState(false);
+  const [rasterizeDpi, setRasterizeDpi] = useState(300);
   const [ghostscriptAvailable, setGhostscriptAvailable] = useState(false);
+  const postProcessorRef = useRef<PdfPostProcessor | null>(null);
 
   // Persistence effects
   useEffect(() => {
@@ -339,21 +378,35 @@ function PDFDropZone() {
     }
   }, [sessionScaleFactor]);
 
-  // Detect Ghostscript availability (Tauri only)
+  // The desktop app invokes its bundled Ghostscript runtime. The web app starts
+  // an idle worker now and downloads the WebAssembly runtime only when needed.
   useEffect(() => {
-    const checkGs = async () => {
-      try {
-        const isTauriEnv = typeof window !== 'undefined' && Boolean((window as any).__TAURI_IPC__);
-        if (isTauriEnv) {
-          const version: string = await invoke('check_ghostscript');
-          setGhostscriptAvailable(Boolean(version));
-        }
-      } catch {
-        setGhostscriptAvailable(false);
+    const processor: PdfPostProcessor = isTauri
+      ? new TauriPdfPostProcessor()
+      : new BrowserPdfPostProcessor();
+    postProcessorRef.current = processor;
+    let active = true;
+
+    if (isTauri) {
+      void invoke<string>('check_ghostscript')
+        .then(version => {
+          if (active) setGhostscriptAvailable(Boolean(version));
+        })
+        .catch(() => {
+          if (active) setGhostscriptAvailable(false);
+        });
+    } else {
+      setGhostscriptAvailable(true);
+    }
+
+    return () => {
+      active = false;
+      processor.dispose();
+      if (postProcessorRef.current === processor) {
+        postProcessorRef.current = null;
       }
     };
-    checkGs();
-  }, []);
+  }, [isTauri]);
 
   // Sync local state with trim
   useEffect(() => {
@@ -418,7 +471,7 @@ function PDFDropZone() {
     }, 3500);
   };
 
-  const handleImportedFile = (nextFile: File, absolutePath?: string) => {
+  const handleImportedFile = (nextFile: File, origin: ImportOrigin = { kind: 'browser' }) => {
     setDragActive(false);
     const kind = detectFileKind(nextFile.name, nextFile.type);
     if (!kind) {
@@ -431,6 +484,7 @@ function PDFDropZone() {
     setOriginalFileName(nextFile.name);
     setOriginalImportedName(nextFile.name);
     setFileSize(nextFile.size);
+    setExportFolder(initialExportDirectory(origin));
     setTrim(0);
     setCurrentPage(0);
     setTotalPages(1);
@@ -454,12 +508,6 @@ function PDFDropZone() {
         ];
       });
     }
-    // Set export folder to imported file location (Tauri only, if available)
-    const filePath = absolutePath || (nextFile as any).path;
-    if (isTauri && filePath) {
-      const folder = getDirectoryFromPath(String(filePath));
-      if (folder) setExportFolder(folder);
-    }
   };
 
   // Handle file selection
@@ -470,15 +518,14 @@ function PDFDropZone() {
   };
 
   const importFileByPath = async (absPath: string) => {
-    const maybeKind = detectFileKind(getBaseNameFromPath(absPath));
+    const importedFile = await invoke<NativeImportedFile>('read_import_file', { path: absPath });
+    const maybeKind = detectFileKind(importedFile.fileName);
     if (!maybeKind) {
       showUnsupportedFormatBanner();
       return;
     }
-    const bytes = await readBinaryFile(absPath);
-    const fileNameFromPath = getBaseNameFromPath(absPath);
-    const imported = new File([bytes], fileNameFromPath);
-    handleImportedFile(imported, absPath);
+    const imported = new File([new Uint8Array(importedFile.bytes)], importedFile.fileName);
+    handleImportedFile(imported, { kind: 'desktop', directory: importedFile.directory });
   };
 
   // Render PDF preview using pdf.js
@@ -891,6 +938,7 @@ function PDFDropZone() {
           const normalizedMode = adj.mode === 'fit' ? 'scale' : (adj.mode || 'fill');
           const normalizedMargin = Math.max(0, Number(adj.marginMm ?? 0));
           const normalizedPaddingMode = adj.paddingMode === 'outside' ? 'outside' : 'inside';
+          const normalizedExtendColor = adj.extendColorIntoPadding === true;
           const normalizedScale = Math.max(0.01, Number(adj.scaleFactor ?? sessionScaleFactor ?? 1));
           const shouldApplyScale = sourceKind === 'pdf' && normalizedMode === 'scale';
           const scaledWidth = shouldApplyScale ? Number((sourceWidthMm * normalizedScale).toFixed(2)) : adj.width;
@@ -899,6 +947,7 @@ function PDFDropZone() {
             adj.mode !== normalizedMode ||
             Number(adj.marginMm ?? 0) !== normalizedMargin ||
             (adj.paddingMode === 'outside' ? 'outside' : 'inside') !== normalizedPaddingMode ||
+            adj.extendColorIntoPadding !== normalizedExtendColor ||
             Number(adj.scaleFactor ?? 0) !== normalizedScale ||
             adj.width !== scaledWidth ||
             adj.height !== scaledHeight;
@@ -909,6 +958,7 @@ function PDFDropZone() {
                 mode: normalizedMode,
                 marginMm: normalizedMargin,
                 paddingMode: normalizedPaddingMode,
+                extendColorIntoPadding: normalizedExtendColor,
                 scaleFactor: normalizedScale,
                 width: scaledWidth,
                 height: scaledHeight,
@@ -1138,13 +1188,13 @@ function PDFDropZone() {
   };
 
   const handlePickFolder = async () => {
-    // @ts-ignore
-    if (window && window.__TAURI_IPC__) {
+    if (isTauri) {
       // Running in Tauri
       const selected = await open({
         directory: true,
         multiple: false,
         title: 'Select export folder',
+        ...(exportFolder ? { defaultPath: exportFolder } : {}),
       });
       if (typeof selected === 'string') {
         setExportFolder(selected);
@@ -1166,8 +1216,6 @@ function PDFDropZone() {
     }
   };
 
-  // Helper to detect Tauri
-  const isTauri = typeof window !== 'undefined' && Boolean((window as any).__TAURI_IPC__);
   const isWindows = typeof navigator !== 'undefined' && /Win/i.test(navigator.platform || navigator.userAgent);
   const isFileSystemAccessSupported = typeof window !== 'undefined' && 'showDirectoryPicker' in window;
   const isExportDirSupported = isTauri || isFileSystemAccessSupported;
@@ -1176,8 +1224,6 @@ function PDFDropZone() {
     if (!isTauri) return;
     let unlisten: (() => void) | null = null;
     let unlistenFileDrop: (() => void) | null = null;
-    let unlistenFileDropHover: (() => void) | null = null;
-    let unlistenFileDropCancelled: (() => void) | null = null;
     (async () => {
       try {
         const pendingPaths = await invoke<string[]>('take_pending_open_paths');
@@ -1206,40 +1252,32 @@ function PDFDropZone() {
         console.error('Failed to subscribe to external-files-opened', e);
       }
       try {
-        unlistenFileDrop = await listen<string[]>('tauri://file-drop', async (event) => {
+        unlistenFileDrop = await getCurrentWebview().onDragDropEvent(async event => {
+          if (event.payload.type === 'enter' || event.payload.type === 'over') {
+            setDragActive(true);
+            return;
+          }
+          if (event.payload.type === 'leave') {
+            setDragActive(false);
+            return;
+          }
           setDragActive(false);
-          const paths = Array.isArray(event.payload) ? event.payload : [];
-          if (paths.length === 0) return;
-          const firstPath = String(paths[0]);
-          try {
-            await importFileByPath(firstPath);
-          } catch (e) {
-            console.error('Failed to import dropped path', firstPath, e);
+          const firstPath = event.payload.paths[0];
+          if (firstPath) {
+            try {
+              await importFileByPath(firstPath);
+            } catch (error) {
+              console.error('Failed to import dropped path', firstPath, error);
+            }
           }
         });
       } catch (e) {
-        console.error('Failed to subscribe to tauri://file-drop', e);
-      }
-      try {
-        unlistenFileDropHover = await listen('tauri://file-drop-hover', () => {
-          setDragActive(true);
-        });
-      } catch (e) {
-        console.error('Failed to subscribe to tauri://file-drop-hover', e);
-      }
-      try {
-        unlistenFileDropCancelled = await listen('tauri://file-drop-cancelled', () => {
-          setDragActive(false);
-        });
-      } catch (e) {
-        console.error('Failed to subscribe to tauri://file-drop-cancelled', e);
+        console.error('Failed to subscribe to native file drops', e);
       }
     })();
     return () => {
       if (unlisten) unlisten();
       if (unlistenFileDrop) unlistenFileDrop();
-      if (unlistenFileDropHover) unlistenFileDropHover();
-      if (unlistenFileDropCancelled) unlistenFileDropCancelled();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isTauri]);
@@ -1277,10 +1315,21 @@ function PDFDropZone() {
     return tasks;
   };
 
-  const writeExportFile = async (folder: string, fileNameWithExt: string, bytes: Uint8Array, mimeType: string, dirHandle?: any) => {
+  const writeExportFile = async (
+    folder: string,
+    fileNameWithExt: string,
+    bytes: Uint8Array,
+    mimeType: string,
+    dirHandle?: any,
+    overwrite = false,
+  ) => {
     if (isTauri) {
-      const savePath = folder.replace(/\/+$/, '') + '/' + fileNameWithExt;
-      await writeBinaryFile({ path: savePath, contents: bytes });
+      await invoke('write_export_file', {
+        directory: folder,
+        fileName: fileNameWithExt,
+        contents: Array.from(bytes),
+        overwrite,
+      });
       return;
     }
     if (dirHandle) {
@@ -1294,7 +1343,9 @@ function PDFDropZone() {
       await writable.close();
       return;
     }
-    const blob = new Blob([bytes], { type: mimeType });
+    const blobBytes = new Uint8Array(bytes.byteLength);
+    blobBytes.set(bytes);
+    const blob = new Blob([blobBytes.buffer], { type: mimeType });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -1307,7 +1358,13 @@ function PDFDropZone() {
     }, 5000);
   };
 
-  const renderPngBytes = async (fileToSave: File, adj: Adjuster, pageIdx: number, currentTrim: number) => {
+  const renderPngBytes = async (
+    fileToSave: File,
+    adj: Adjuster,
+    pageIdx: number,
+    currentTrim: number,
+    pixelsPerMm: number = 1,
+  ) => {
     if (sourceKind === 'image') {
       let bitmap: ImageBitmap | null = null;
       try {
@@ -1331,11 +1388,11 @@ function PDFDropZone() {
       const srcWidth = bitmap.width;
       const srcHeight = bitmap.height;
       const layoutMm = getPaddingLayoutMm(adj);
-      const targetWidth = Math.max(1, Math.round(layoutMm.pageWidthMm));
-      const targetHeight = Math.max(1, Math.round(layoutMm.pageHeightMm));
-      const contentOffsetPx = Math.max(0, Math.round(layoutMm.contentOffsetMm));
-      const usableTargetWidth = Math.max(1, Math.round(layoutMm.contentWidthMm));
-      const usableTargetHeight = Math.max(1, Math.round(layoutMm.contentHeightMm));
+      const targetWidth = Math.max(1, Math.round(layoutMm.pageWidthMm * pixelsPerMm));
+      const targetHeight = Math.max(1, Math.round(layoutMm.pageHeightMm * pixelsPerMm));
+      const contentOffsetPx = Math.max(0, Math.round(layoutMm.contentOffsetMm * pixelsPerMm));
+      const usableTargetWidth = Math.max(1, Math.round(layoutMm.contentWidthMm * pixelsPerMm));
+      const usableTargetHeight = Math.max(1, Math.round(layoutMm.contentHeightMm * pixelsPerMm));
       const outputCanvas = document.createElement('canvas');
       outputCanvas.width = targetWidth;
       outputCanvas.height = targetHeight;
@@ -1346,25 +1403,31 @@ function PDFDropZone() {
       outCtx.imageSmoothingEnabled = true;
       outCtx.imageSmoothingQuality = 'high';
 
-      if (adj.mode === 'fill') {
-        const scale = Math.max(usableTargetWidth / srcWidth, usableTargetHeight / srcHeight);
-        const drawW = srcWidth * scale;
-        const drawH = srcHeight * scale;
-        const offsetX = contentOffsetPx + (usableTargetWidth - drawW) / 2;
-        const offsetY = contentOffsetPx + (usableTargetHeight - drawH) / 2;
-        outCtx.drawImage(bitmap, offsetX, offsetY, drawW, drawH);
-      } else if (adj.mode === 'scale') {
-        const scale = Math.min(usableTargetWidth / srcWidth, usableTargetHeight / srcHeight);
-        const drawW = srcWidth * scale;
-        const drawH = srcHeight * scale;
-        const offsetX = contentOffsetPx + (usableTargetWidth - drawW) / 2;
-        const offsetY = contentOffsetPx + (usableTargetHeight - drawH) / 2;
-        outCtx.drawImage(bitmap, offsetX, offsetY, drawW, drawH);
-      } else {
-        outCtx.drawImage(bitmap, contentOffsetPx, contentOffsetPx, usableTargetWidth, usableTargetHeight);
-      }
-      if (layoutMm.maskPaddingMm > 0) {
-        applyCanvasPaddingMask(outCtx, targetWidth, targetHeight, Math.round(layoutMm.maskPaddingMm), Math.round(layoutMm.maskPaddingMm));
+      const contentRect: Rect = {
+        x: contentOffsetPx,
+        y: contentOffsetPx,
+        width: usableTargetWidth,
+        height: usableTargetHeight,
+      };
+      const mapped = mapContent(
+        { x: 0, y: 0, width: srcWidth, height: srcHeight },
+        contentRect,
+        contentFit(adj.mode),
+      );
+      const draw = mapped.drawRect;
+      outCtx.drawImage(bitmap, draw.x, draw.y, draw.width, draw.height);
+      if (adj.extendColorIntoPadding === true && layoutMm.paddingMm > 0) {
+        drawEdgeExtension(
+          outCtx,
+          bitmap,
+          mapped.visibleSourceRect,
+          contentRect,
+          targetWidth,
+          targetHeight,
+        );
+      } else if (layoutMm.maskPaddingMm > 0) {
+        const maskPaddingPx = Math.round(layoutMm.maskPaddingMm * pixelsPerMm);
+        applyCanvasPaddingMask(outCtx, targetWidth, targetHeight, maskPaddingPx, maskPaddingPx);
       }
       bitmap.close();
       const blob = await new Promise<Blob | null>(resolve => outputCanvas.toBlob(resolve, 'image/png'));
@@ -1390,11 +1453,11 @@ function PDFDropZone() {
     const cropHeight = Math.max(viewport.height - 2 * trimPoints, 1);
 
     const layoutMm = getPaddingLayoutMm(adj);
-    const targetWidth = Math.max(1, Math.round(layoutMm.pageWidthMm));
-    const targetHeight = Math.max(1, Math.round(layoutMm.pageHeightMm));
-    const contentOffsetPx = Math.max(0, Math.round(layoutMm.contentOffsetMm));
-    const usableTargetWidth = Math.max(1, Math.round(layoutMm.contentWidthMm));
-    const usableTargetHeight = Math.max(1, Math.round(layoutMm.contentHeightMm));
+    const targetWidth = Math.max(1, Math.round(layoutMm.pageWidthMm * pixelsPerMm));
+    const targetHeight = Math.max(1, Math.round(layoutMm.pageHeightMm * pixelsPerMm));
+    const contentOffsetPx = Math.max(0, Math.round(layoutMm.contentOffsetMm * pixelsPerMm));
+    const usableTargetWidth = Math.max(1, Math.round(layoutMm.contentWidthMm * pixelsPerMm));
+    const usableTargetHeight = Math.max(1, Math.round(layoutMm.contentHeightMm * pixelsPerMm));
     const fillScale = Math.max(usableTargetWidth / cropWidth, usableTargetHeight / cropHeight);
     const fitScale = Math.min(usableTargetWidth / cropWidth, usableTargetHeight / cropHeight);
     const renderScale = adj.mode === 'scale' ? fitScale : fillScale;
@@ -1429,23 +1492,41 @@ function PDFDropZone() {
     outCtx.imageSmoothingEnabled = true;
     outCtx.imageSmoothingQuality = 'high';
 
-    if (adj.mode === 'fill') {
-      const drawW = srcW;
-      const drawH = srcH;
-      const offsetX = contentOffsetPx + (usableTargetWidth - drawW) / 2;
-      const offsetY = contentOffsetPx + (usableTargetHeight - drawH) / 2;
-      outCtx.drawImage(tempCanvas, srcX, srcY, srcW, srcH, offsetX, offsetY, drawW, drawH);
-    } else if (adj.mode === 'scale') {
-      const drawW = srcW;
-      const drawH = srcH;
-      const offsetX = contentOffsetPx + (usableTargetWidth - drawW) / 2;
-      const offsetY = contentOffsetPx + (usableTargetHeight - drawH) / 2;
-      outCtx.drawImage(tempCanvas, srcX, srcY, srcW, srcH, offsetX, offsetY, drawW, drawH);
-    } else {
-      outCtx.drawImage(tempCanvas, srcX, srcY, srcW, srcH, contentOffsetPx, contentOffsetPx, usableTargetWidth, usableTargetHeight);
-    }
-    if (layoutMm.maskPaddingMm > 0) {
-      applyCanvasPaddingMask(outCtx, targetWidth, targetHeight, Math.round(layoutMm.maskPaddingMm), Math.round(layoutMm.maskPaddingMm));
+    const contentRect: Rect = {
+      x: contentOffsetPx,
+      y: contentOffsetPx,
+      width: usableTargetWidth,
+      height: usableTargetHeight,
+    };
+    const mapped = mapContent(
+      { x: srcX, y: srcY, width: srcW, height: srcH },
+      contentRect,
+      contentFit(adj.mode),
+    );
+    const draw = mapped.drawRect;
+    outCtx.drawImage(
+      tempCanvas,
+      srcX,
+      srcY,
+      srcW,
+      srcH,
+      draw.x,
+      draw.y,
+      draw.width,
+      draw.height,
+    );
+    if (adj.extendColorIntoPadding === true && layoutMm.paddingMm > 0) {
+      drawEdgeExtension(
+        outCtx,
+        tempCanvas,
+        mapped.visibleSourceRect,
+        contentRect,
+        targetWidth,
+        targetHeight,
+      );
+    } else if (layoutMm.maskPaddingMm > 0) {
+      const maskPaddingPx = Math.round(layoutMm.maskPaddingMm * pixelsPerMm);
+      applyCanvasPaddingMask(outCtx, targetWidth, targetHeight, maskPaddingPx, maskPaddingPx);
     }
 
     const blob = await new Promise<Blob | null>(resolve => outputCanvas.toBlob(resolve, 'image/png'));
@@ -1454,22 +1535,141 @@ function PDFDropZone() {
     return new Uint8Array(pngBuffer);
   };
 
-  const runExportTasks = async (folder: string, tasks: ExportTask[], fileToSave: File, currentTrim: number, dirHandle?: any) => {
+  const renderPdfPaddingStrips = async (
+    fileToSave: File,
+    adjuster: Adjuster,
+    pageIdx: number,
+    currentTrim: number,
+    pageWidthPoints: number,
+    pageHeightPoints: number,
+  ): Promise<PdfPaddingStrip[]> => {
+    const layoutMm = getPaddingLayoutMm(adjuster);
+    const longestSideMm = Math.max(layoutMm.pageWidthMm, layoutMm.pageHeightMm, 1);
+    const pixelsPerMm = Math.min(4, 4096 / longestSideMm);
+    const renderedBytes = await renderPngBytes(
+      fileToSave,
+      adjuster,
+      pageIdx,
+      currentTrim,
+      pixelsPerMm,
+    );
+    const renderedBitmap = await createImageBitmap(new Blob([renderedBytes], { type: 'image/png' }));
+    const contentRect: Rect = {
+      x: Math.max(0, Math.round(layoutMm.contentOffsetMm * pixelsPerMm)),
+      y: Math.max(0, Math.round(layoutMm.contentOffsetMm * pixelsPerMm)),
+      width: Math.max(1, Math.round(layoutMm.contentWidthMm * pixelsPerMm)),
+      height: Math.max(1, Math.round(layoutMm.contentHeightMm * pixelsPerMm)),
+    };
+    const regions = paddingStripRegions(
+      contentRect,
+      renderedBitmap.width,
+      renderedBitmap.height,
+    );
+
+    try {
+      return await Promise.all(regions.map(async region => {
+        const source = region.source;
+        const stripCanvas = document.createElement('canvas');
+        stripCanvas.width = Math.max(1, Math.round(source.width));
+        stripCanvas.height = Math.max(1, Math.round(source.height));
+        const stripContext = stripCanvas.getContext('2d');
+        if (!stripContext) throw new Error('Failed to create PDF padding strip context.');
+        stripContext.drawImage(
+          renderedBitmap,
+          source.x,
+          source.y,
+          source.width,
+          source.height,
+          0,
+          0,
+          stripCanvas.width,
+          stripCanvas.height,
+        );
+        return {
+          image: rgbaToDeviceCmyk(
+            stripContext.getImageData(0, 0, stripCanvas.width, stripCanvas.height).data,
+            stripCanvas.width,
+            stripCanvas.height,
+          ),
+          destination: {
+            x: source.x / renderedBitmap.width * pageWidthPoints,
+            y: (renderedBitmap.height - source.y - source.height) / renderedBitmap.height * pageHeightPoints,
+            width: source.width / renderedBitmap.width * pageWidthPoints,
+            height: source.height / renderedBitmap.height * pageHeightPoints,
+          },
+        };
+      }));
+    } finally {
+      renderedBitmap.close();
+    }
+  };
+
+  const renderPdfCmykEdgeSamples = async (
+    pdfBytes: ArrayBuffer,
+    pageIdx: number,
+    sourceWidth: number,
+    sourceHeight: number,
+    visibleSourceRect: Rect,
+    outputIccProfile?: Uint8Array,
+  ) => {
+    const request = cmykEdgeSampleRequest(sourceWidth, sourceHeight, visibleSourceRect);
+    const processor = postProcessorRef.current;
+    if (!processor) throw new Error('The PDF processor is still starting. Try again in a moment.');
+    return processor.renderCmykEdges(pdfBytes, pageIdx + 1, request, outputIccProfile);
+  };
+
+  const runExportTasks = async (
+    folder: string,
+    tasks: ExportTask[],
+    fileToSave: File,
+    currentTrim: number,
+    dirHandle?: any,
+    overwrite = false,
+  ) => {
+    let sourcePdfBuffer: ArrayBuffer | null = null;
+    let sourcePdfDocument: Awaited<ReturnType<typeof PDFDocument.load>> | null = null;
     let processedPdfBuffer: ArrayBuffer | null = null;
+    let processedPdfPageOrder: PdfPageOrder = { kind: 'source' };
     const needsPdf = tasks.some(t => t.kind === 'pdf');
     let imageSourcePngBytes: Uint8Array | null = null;
     let imageSourceSize: { width: number; height: number } | null = null;
     if (needsPdf) {
       if (sourceKind === 'pdf') {
-        processedPdfBuffer = await fileToSave.arrayBuffer();
-        if (flatten && isTauri) {
+        sourcePdfBuffer = await fileToSave.arrayBuffer();
+        processedPdfBuffer = sourcePdfBuffer;
+        if ((outlineText && !rasterize) || (ghostscriptAvailable && tasks.some(task => (
+          task.kind === 'pdf'
+          && task.adjuster.extendColorIntoPadding === true
+          && Number(task.adjuster.marginMm ?? 0) > 0
+        )))) {
+          sourcePdfDocument = await PDFDocument.load(sourcePdfBuffer);
+        }
+        if (outlineText || rasterize) {
           try {
-            const flattenedBytes: number[] = await invoke('flatten_pdf', {
-              pdfBytes: Array.from(new Uint8Array(processedPdfBuffer)),
-            });
-            processedPdfBuffer = new Uint8Array(flattenedBytes).buffer;
-          } catch (e: any) {
-            throw new Error(`Flatten failed: ${e}`);
+            const processor = postProcessorRef.current;
+            if (!processor) throw new Error('The PDF processor is still starting. Try again in a moment.');
+            if (rasterize) {
+              processedPdfBuffer = await processor.rasterizePdf(processedPdfBuffer, rasterizeDpi);
+            } else {
+              const sourcePageIndexes = uniquePageIndexes(
+                tasks.filter(task => task.kind === 'pdf').flatMap(task => task.pages),
+              );
+              const needsOutlining = sourcePdfDocument
+                ? sourcePageIndexes.some(pageIndex => (
+                  pageHasFontResources(sourcePdfDocument.getPage(pageIndex))
+                ))
+                : true;
+              if (needsOutlining) {
+                processedPdfBuffer = await processor.outlineText(
+                  processedPdfBuffer,
+                  ghostscriptPageNumbers(sourcePageIndexes),
+                );
+                processedPdfPageOrder = { kind: 'selection', sourcePageIndexes };
+              }
+            }
+          } catch (error: unknown) {
+            const detail = error instanceof Error ? error.message : String(error);
+            throw new Error(`${rasterize ? 'Rasterize' : 'Outline text'} failed: ${detail}`);
           }
         }
       } else if (sourceKind === 'image') {
@@ -1513,7 +1713,8 @@ function PDFDropZone() {
           if (!processedPdfBuffer) throw new Error('PDF source buffer missing.');
           const pdfDoc = await PDFDocument.load(processedPdfBuffer);
           for (const pageIdx of task.pages) {
-            const srcPage = pdfDoc.getPage(pageIdx);
+            const processedPageIdx = outputPageIndex(processedPdfPageOrder, pageIdx);
+            const srcPage = pdfDoc.getPage(processedPageIdx);
             const { width: srcWidth, height: srcHeight } = srcPage.getSize();
             let cropX = 0, cropY = 0, cropWidth = srcWidth, cropHeight = srcHeight;
             if (currentTrim > 0) {
@@ -1531,32 +1732,86 @@ function PDFDropZone() {
             const contentOffsetPoints = layoutMm.contentOffsetMm * POINTS_PER_MM;
             const usableTargetWidth = Math.max(layoutMm.contentWidthMm * POINTS_PER_MM, 1);
             const usableTargetHeight = Math.max(layoutMm.contentHeightMm * POINTS_PER_MM, 1);
-            const [embeddedPage] = await newPdf.embedPages([srcPage], [
+            const contentRect: Rect = {
+              x: contentOffsetPoints,
+              y: contentOffsetPoints,
+              width: usableTargetWidth,
+              height: usableTargetHeight,
+            };
+            const mapped = mapContent(
+              { x: cropX, y: cropY, width: cropWidth, height: cropHeight },
+              contentRect,
+              contentFit(task.adjuster.mode),
+            );
+            const draw = mapped.drawRect;
+            // Work on an export-owned copy so mask rebasing cannot accumulate
+            // when the same source page is exported at several sizes.
+            const [exportPage] = await newPdf.copyPages(pdfDoc, [processedPageIdx]);
+            rebasePageSoftMasks(exportPage, draw.width / cropWidth, draw.height / cropHeight);
+            const canTransformPageDirectly = currentTrim === 0
+              && task.adjuster.extendColorIntoPadding !== true
+              && layoutMm.maskPaddingMm === 0;
+            if (canTransformPageDirectly) {
+              const resizedPage = exportPage;
+              newPdf.addPage(resizedPage);
+              resizedPage.setSize(targetWidth, targetHeight);
+              resizedPage.scaleContent(draw.width / srcWidth, draw.height / srcHeight);
+              resizedPage.translateContent(draw.x, draw.y);
+              continue;
+            }
+            const [embeddedPage] = await newPdf.embedPages([exportPage], [
               { left: cropX, bottom: cropY, right: cropX + cropWidth, top: cropY + cropHeight },
             ]);
-            let scaleX = 1;
-            let scaleY = 1;
-            let offsetX = contentOffsetPoints;
-            let offsetY = contentOffsetPoints;
-            if (task.adjuster.mode === 'fill') {
-              const scale = Math.max(usableTargetWidth / cropWidth, usableTargetHeight / cropHeight);
-              scaleX = scale;
-              scaleY = scale;
-              offsetX = contentOffsetPoints + (usableTargetWidth - cropWidth * scale) / 2;
-              offsetY = contentOffsetPoints + (usableTargetHeight - cropHeight * scale) / 2;
-            } else if (task.adjuster.mode === 'scale') {
-              const scale = Math.min(usableTargetWidth / cropWidth, usableTargetHeight / cropHeight);
-              scaleX = scale;
-              scaleY = scale;
-              offsetX = contentOffsetPoints + (usableTargetWidth - cropWidth * scale) / 2;
-              offsetY = contentOffsetPoints + (usableTargetHeight - cropHeight * scale) / 2;
-            } else {
-              scaleX = usableTargetWidth / cropWidth;
-              scaleY = usableTargetHeight / cropHeight;
+            await newPdf.flush();
+            const pageGroup = exportPage.node.get(PDFName.of('Group'));
+            const embeddedStream = newPdf.context.lookup(embeddedPage.ref);
+            if (pageGroup && embeddedStream instanceof PDFRawStream) {
+              embeddedStream.dict.set(PDFName.of('Group'), pageGroup);
             }
             const newPage = newPdf.addPage([targetWidth, targetHeight]);
-            newPage.drawPage(embeddedPage, { x: offsetX, y: offsetY, xScale: scaleX, yScale: scaleY });
-            if (layoutMm.maskPaddingMm > 0) {
+            newPage.drawPage(embeddedPage, {
+              x: draw.x,
+              y: draw.y,
+              xScale: draw.width / cropWidth,
+              yScale: draw.height / cropHeight,
+            });
+            if (task.adjuster.extendColorIntoPadding === true && layoutMm.paddingMm > 0) {
+              if (ghostscriptAvailable) {
+                if (!sourcePdfBuffer) throw new Error('Original PDF source buffer missing.');
+                const sourceIccProfile = sourcePdfDocument
+                  ? extractPageCmykIccProfile(sourcePdfDocument, sourcePdfDocument.getPage(pageIdx))
+                  : null;
+                const edgeSamples = await renderPdfCmykEdgeSamples(
+                  sourcePdfBuffer,
+                  pageIdx,
+                  srcWidth,
+                  srcHeight,
+                  mapped.visibleSourceRect,
+                  sourceIccProfile ?? undefined,
+                );
+                drawCmykVectorPadding(
+                  newPdf,
+                  newPage,
+                  edgeSamples,
+                  contentRect,
+                  targetWidth,
+                  targetHeight,
+                  sourceIccProfile ?? undefined,
+                );
+              } else {
+                const paddingStrips = await renderPdfPaddingStrips(
+                  fileToSave,
+                  task.adjuster,
+                  pageIdx,
+                  currentTrim,
+                  targetWidth,
+                  targetHeight,
+                );
+                for (const strip of paddingStrips) {
+                  drawDeviceCmykImage(newPdf, newPage, strip.image, strip.destination);
+                }
+              }
+            } else if (layoutMm.maskPaddingMm > 0) {
               applyPdfPaddingMask(newPage, targetWidth, targetHeight, layoutMm.maskPaddingMm * POINTS_PER_MM);
             }
           }
@@ -1603,10 +1858,10 @@ function PDFDropZone() {
           throw new Error('Unsupported source type for PDF export.');
         }
         const pdfBytes = await newPdf.save();
-        await writeExportFile(folder, fileNameWithExt, pdfBytes, 'application/octet-stream', dirHandle);
+        await writeExportFile(folder, fileNameWithExt, pdfBytes, 'application/octet-stream', dirHandle, overwrite);
       } else {
         const pngBytes = await renderPngBytes(fileToSave, task.adjuster, task.pageIdx ?? task.pages[0], currentTrim);
-        await writeExportFile(folder, fileNameWithExt, pngBytes, 'image/png', dirHandle);
+        await writeExportFile(folder, fileNameWithExt, pngBytes, 'image/png', dirHandle, overwrite);
       }
     }
   };
@@ -1620,6 +1875,36 @@ function PDFDropZone() {
     const pdf = await getDocument({ data: arrayBuffer }).promise;
     pdfDocRef.current = pdf;
     return Array.from({ length: pdf.numPages }, (_, i) => i);
+  };
+
+  const prepareNativeExportDirectory = async (
+    preferredDirectory: string,
+    subfolder: string | null,
+  ): Promise<string | null> => {
+    if (preferredDirectory) {
+      try {
+        return await invoke<string>('prepare_export_directory', {
+          directory: preferredDirectory,
+          subfolder,
+        });
+      } catch {
+        // Cloud providers can expose a readable source without allowing a sibling write.
+        // The native picker grants access to a destination the user confirms.
+      }
+    }
+
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: 'Choose a writable export folder',
+      ...(preferredDirectory ? { defaultPath: preferredDirectory } : {}),
+    });
+    if (typeof selected !== 'string') return null;
+    setExportFolder(selected);
+    return invoke<string>('prepare_export_directory', {
+      directory: selected,
+      subfolder,
+    });
   };
 
   // Tauri-based export handler
@@ -1639,24 +1924,20 @@ function PDFDropZone() {
       let folder = exportFolder;
       let dirHandle = exportDirHandle;
 
-      if (!specifyExportLocation) {
-        if (!isTauri) {
-          dirHandle = null; // Force download behavior on web
+      if (isTauri) {
+        const subfolder = selectedSubfolder(
+          specifyExportLocation && useSubfolder,
+          subfolderName,
+        );
+        const preparedDirectory = await prepareNativeExportDirectory(folder, subfolder);
+        if (!preparedDirectory) {
+          setSaveStatus('idle');
+          return;
         }
-        // On Tauri, we use the default 'folder' (source path)
-      } else {
-        if (isTauri) {
-          if (!folder) {
-            const selected = await open({ directory: true, multiple: false, title: 'Select export folder' });
-            if (typeof selected === 'string') {
-              folder = selected;
-              setExportFolder(selected);
-            } else {
-              setSaveStatus('idle');
-              return;
-            }
-          }
-        }
+        folder = preparedDirectory;
+        dirHandle = null;
+      } else if (!specifyExportLocation) {
+        dirHandle = null;
       }
 
       const pagesToProcess = await resolvePagesToProcess(file);
@@ -1665,29 +1946,27 @@ function PDFDropZone() {
         throw new Error('No export tasks could be created for this source file type.');
       }
       setPendingExportTasks(tasks);
+      setPendingExportDirectory(folder);
 
       if (isTauri) {
-        if (specifyExportLocation && useSubfolder && subfolderName.trim()) {
-          folder = folder.replace(/\/+$/, '') + '/' + subfolderName.trim().replace(/\/+$/, '');
-        }
-
-        const filePathsToCheck: string[] = [];
         const proposedFiles: Array<{ fileName: string; isConflict: boolean; shouldOverwrite: boolean; originalPath?: string; taskId?: string }> = [];
+        const fileNamesToCheck: string[] = [];
 
         for (const task of tasks) {
           const fullName = `${task.outputBaseName}.${task.extension}`;
-          const savePath = folder.replace(/\/+$/, '') + '/' + fullName;
-          filePathsToCheck.push(savePath);
+          fileNamesToCheck.push(fullName);
           proposedFiles.push({
             fileName: fullName,
             isConflict: false,
             shouldOverwrite: true,
-            originalPath: savePath,
             taskId: task.id,
           });
         }
 
-        const existenceResults: boolean[] = await invoke('check_file_existence', { filePaths: filePathsToCheck });
+        const existenceResults = await invoke<boolean[]>('check_export_conflicts', {
+          directory: folder,
+          fileNames: fileNamesToCheck,
+        });
         let hasConflicts = false;
         const updatedConflictFiles = proposedFiles.map((file, index) => {
           const isConflict = existenceResults[index];
@@ -1745,14 +2024,15 @@ function PDFDropZone() {
       }
 
       // If no conflicts or in browser, proceed with saving
-      await runExportTasks(folder, tasks, file, trim, dirHandle);
+      await runExportTasks(folder, tasks, file, trim, dirHandle, false);
       setSaveStatus('success');
       fadeTimeout.current = setTimeout(() => setSaveStatus('idle'), 5000);
       setPendingExportTasks([]);
+      setPendingExportDirectory('');
 
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('[Export] Error during export:', err);
-      setErrorMessage(err?.message || String(err));
+      setErrorMessage(nativeErrorMessage(err));
       setSaveStatus('error');
       setShowPopover(true);
     }
@@ -1770,18 +2050,14 @@ function PDFDropZone() {
       );
       const tasksToSave = pendingExportTasks.filter(task => selectedTaskIds.has(task.id));
 
-      let folder = exportFolder;
-      if (specifyExportLocation && useSubfolder && subfolderName.trim()) {
-        folder = folder.replace(/\/+$/, '') + '/' + subfolderName.trim().replace(/\/+$/, '');
-      }
-
-      await runExportTasks(folder, tasksToSave, file, trim, exportDirHandle);
+      await runExportTasks(pendingExportDirectory, tasksToSave, file, trim, exportDirHandle, true);
       setSaveStatus('success');
       fadeTimeout.current = setTimeout(() => setSaveStatus('idle'), 5000);
       setConflictFiles([]); // Clear conflicts after saving
       setPendingExportTasks([]);
-    } catch (err: any) {
-      setErrorMessage(err?.message || String(err));
+      setPendingExportDirectory('');
+    } catch (err: unknown) {
+      setErrorMessage(nativeErrorMessage(err));
       setSaveStatus('error');
       setShowPopover(true);
     }
@@ -1793,6 +2069,7 @@ function PDFDropZone() {
     setShowPopover(false);
     setConflictFiles([]); // Clear conflicts on cancel
     setPendingExportTasks([]);
+    setPendingExportDirectory('');
   };
 
   const handleAddPdfAdjuster = () => {
@@ -1813,6 +2090,7 @@ function PDFDropZone() {
               height: fallbackHeight,
               marginMm: 0,
               paddingMode: 'inside',
+              extendColorIntoPadding: false,
               scaleFactor: sessionScaleFactor,
               source: 'manual',
             },
@@ -2163,30 +2441,6 @@ function PDFDropZone() {
               )}
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--secondary-color)', fontSize: 14 }}>
-              <label
-                title={!isTauri ? 'Requires desktop app with Ghostscript installed' :
-                  !ghostscriptAvailable
-                    ? (isWindows
-                      ? 'Ghostscript is unavailable. Reinstall using the latest Windows installer release.'
-                      : 'Ghostscript is unavailable. This app expects a bundled sidecar; install Ghostscript only as fallback.')
-                    : undefined}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  cursor: (isTauri && ghostscriptAvailable) ? 'pointer' : 'not-allowed',
-                  opacity: (isTauri && ghostscriptAvailable) ? 1 : 0.5,
-                  color: 'var(--text-color)',
-                }}
-              >
-                <input
-                  type="checkbox"
-                  checked={flatten}
-                  onChange={e => setFlatten(e.target.checked)}
-                  disabled={!isTauri || !ghostscriptAvailable}
-                  style={{ marginRight: 6 }}
-                />
-                Flatten
-              </label>
               <span>Trim:</span>
               <input
               type="text"
@@ -2304,6 +2558,26 @@ function PDFDropZone() {
               RemoveIcon={MinusCircleFill}
               presets={presets}
               onEditPresets={() => setShowPresetsEditor(true)}
+              showPdfPostProcessControls={sourceKind === 'pdf' && idx === 0}
+              outlineText={outlineText}
+              rasterize={rasterize}
+              rasterizeDpi={rasterizeDpi}
+              postProcessEnabled={ghostscriptAvailable}
+              postProcessTitle={!ghostscriptAvailable
+                  ? (isWindows
+                    ? 'Ghostscript is unavailable. Reinstall using the latest Windows installer release.'
+                    : 'Ghostscript is unavailable. Reload the app or reinstall the desktop app.')
+                  : undefined}
+              onOutlineTextChange={(checked: boolean) => {
+                setOutlineText(checked);
+                if (checked) setRasterize(false);
+              }}
+              onRasterizeChange={(checked: boolean) => {
+                setRasterize(checked);
+                if (checked) setOutlineText(false);
+              }}
+              onRasterizeDpiChange={setRasterizeDpi}
+              allowExtendColorIntoPadding={sourceKind === 'pdf'}
             />
           ))}
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 16, marginTop: 8 }}>

@@ -113,12 +113,19 @@ def make_writable(path: pathlib.Path):
     path.chmod(mode | stat.S_IWUSR)
 
 
-def ad_hoc_sign(gs_bin: pathlib.Path, lib_dir: pathlib.Path):
-    # install_name_tool invalidates Mach-O signatures on macOS; ad-hoc sign the closure.
+def sign_closure(gs_bin: pathlib.Path, lib_dir: pathlib.Path, signing_identity: str | None):
+    # install_name_tool invalidates Mach-O signatures on macOS; re-sign the closure.
+    identity = signing_identity or "-"
     sign_targets = [gs_bin] + sorted(lib_dir.glob("*.dylib"))
     for target in sign_targets:
         make_writable(target)
-        subprocess.run(["codesign", "--force", "--sign", "-", str(target)], check=True)
+        cmd = ["codesign", "--force", "--sign", identity]
+        if signing_identity:
+            cmd.extend(["--timestamp"])
+            if target == gs_bin:
+                cmd.extend(["--options", "runtime"])
+        cmd.append(str(target))
+        subprocess.run(cmd, check=True)
 
 
 def pick_first_existing(candidates):
@@ -148,6 +155,7 @@ def main():
     parser.add_argument("--brew-prefix")
     parser.add_argument("--gs-bin")
     parser.add_argument("--share-dir")
+    parser.add_argument("--sign-identity")
     parser.add_argument("--output-root", required=True)
     args = parser.parse_args()
 
@@ -211,7 +219,7 @@ def main():
 
     copy_recursive_closure(gs_bin, out_lib, brew_prefix)
     rewrite_install_names(gs_bin, out_lib)
-    ad_hoc_sign(gs_bin, out_lib)
+    sign_closure(gs_bin, out_lib, args.sign_identity)
     print(f"Prepared Ghostscript runtime at {out_root}")
 
 
